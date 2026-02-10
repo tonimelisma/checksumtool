@@ -11,29 +11,42 @@ My personal use case is to detect bit rot in any pictures. Throughout the years 
 - Update the checksum database with new or changed files
 - List files that are missing from the checksum database
 - Add checksums for missing files to the database
+- List and remove deleted files from the database
 - Progress tracking and estimation of remaining time
 - Interrupt handling to save work done so far
+- Non-zero exit code on checksum mismatches in check mode
 
 ## Usage
 checksumtool [flags] [directories...]
 
 ### Flags
-- `-db string`: Checksum database file location (default "$HOME/.local/lib/checksums.json")
+- `-db string`: Checksum database file location (default `$HOME/.local/share/checksumtool/checksums.json`)
 - `-verbose`: Enable verbose output
-- `-mode string`: Operation mode: check, update, list-missing, add-missing
+- `-mode string`: Operation mode: check, update, list-missing, add-missing, remove-deleted, list-deleted
 - `-workers int`: Number of worker goroutines (default 4)
 
 ### Operation Modes
-- `check`: Compare checksums of files against the stored database and report any mismatches.
-- `update`: Update the checksum database with new or changed files.
-- `list-missing`: List files that are missing from the checksum database.
-- `add-missing`: Add checksums for missing files to the database.
+- `check`: Compare checksums of files against the stored database and report any mismatches. Exits with code 1 if any mismatches are found. Directories are optional; if omitted, all DB entries are checked.
+- `update`: Update the checksum database with new or changed files. Directories are optional; if omitted, all DB entries are re-checked.
+- `list-missing`: List files that are missing from the checksum database. Requires at least one directory.
+- `add-missing`: Add checksums for missing files to the database. Requires at least one directory.
+- `remove-deleted`: Remove files from the database that no longer exist on disk. Directories are optional; if omitted, all DB entries are checked.
+- `list-deleted`: List files in the database that no longer exist on disk. Directories are optional; if omitted, all DB entries are checked.
+
+### Notes
+
+- Symlinks are followed by default (Go's `filepath.Walk` behavior). Symlink loops may cause issues.
+- The database file is created with mode 0600 (owner read/write only).
 
 ### Examples
 
 `checksumtool -mode check ~/Documents ~/Pictures`
 
 Compare checksums of files in the "Documents" and "Pictures" directories against the stored database.
+
+`checksumtool -mode check`
+
+Check all files in the database regardless of directory.
 
 `checksumtool -mode update -verbose ~/Projects`
 
@@ -47,6 +60,19 @@ List files in the "Music" directory that are missing from the checksum database.
 
 Add checksums for missing files in the "Videos" directory to the database, using 8 worker goroutines.
 
+`checksumtool -mode list-deleted`
+
+List all files in the database that no longer exist on disk.
+
+`checksumtool -mode remove-deleted ~/Pictures`
+
+Remove deleted files under "Pictures" from the database.
+
+## Breaking Changes (v2)
+
+- **Hash algorithm**: Switched from CRC32 to xxhash64 for better performance and collision resistance. Existing databases must be regenerated using `update` mode.
+- **Default DB path**: Changed from `~/.local/lib/checksums.json` to `~/.local/share/checksumtool/checksums.json`.
+
 ## Attribution
 
-checksumtool is developed by Toni Melisma and released in 2024. The code was almost entirely written by Claude 3 Opus based on my algorithm and instructions.
+checksumtool is developed by Toni Melisma and released in 2024. The code was almost entirely written by Claude based on my algorithm and instructions.
