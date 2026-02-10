@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1025,6 +1026,65 @@ func TestMainBinary(t *testing.T) {
 	if err == nil {
 		t.Error("Expected non-zero exit for update mode with unreadable file")
 	}
+
+	// Test: config file provides directories
+	cfgDir := t.TempDir()
+	cfgTestDir := t.TempDir()
+	cfgTestFile := filepath.Join(cfgTestDir, "cfgfile.txt")
+	os.WriteFile(cfgTestFile, []byte("config test"), 0644)
+	cfgDB := filepath.Join(t.TempDir(), "cfg.json")
+	cfgFile := filepath.Join(cfgDir, "config.toml")
+	os.WriteFile(cfgFile, []byte(fmt.Sprintf("directories = [%q]\n", cfgTestDir)), 0644)
+
+	// add-missing using config file directories (no CLI dirs)
+	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", cfgDB, "-config", cfgFile)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected success for add-missing with config dirs, got: %v\n%s", err, out)
+	}
+	if !fileExists(cfgDB) {
+		t.Fatal("Expected DB file to be created from config dirs")
+	}
+
+	// check using config file directories should pass
+	cmd = exec.Command(binPath, "-mode", "check", "-db", cfgDB, "-config", cfgFile)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected check to pass with config dirs, got: %v\n%s", err, out)
+	}
+
+	// Test: missing config file should silently use defaults
+	cmd = exec.Command(binPath, "-mode", "check", "-db", dbPath, "-config", "/nonexistent/config.toml")
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected success with missing config file, got: %v\n%s", err, out)
+	}
+
+	// Test: invalid config file should error
+	badCfg := filepath.Join(t.TempDir(), "bad.toml")
+	os.WriteFile(badCfg, []byte("{{invalid!!"), 0644)
+	cmd = exec.Command(binPath, "-mode", "check", "-db", dbPath, "-config", badCfg)
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Error("Expected non-zero exit for invalid config file")
+	}
+
+	// Test: config with workers and verbose
+	cfgWithOpts := filepath.Join(t.TempDir(), "opts.toml")
+	os.WriteFile(cfgWithOpts, []byte("workers = 2\nverbose = true\n"), 0644)
+	cmd = exec.Command(binPath, "-mode", "check", "-db", cfgDB, "-config", cfgWithOpts)
+	out, err = cmd.CombinedOutput()
+	// Should have verbose output from config
+	if !strings.Contains(string(out), "Loading checksum database") {
+		t.Errorf("Expected verbose output from config, got: %s", out)
+	}
+
+	// Test: CLI flags override config
+	cmd = exec.Command(binPath, "-mode", "check", "-db", cfgDB, "-config", cfgWithOpts, "-verbose=false")
+	out, err = cmd.CombinedOutput()
+	if strings.Contains(string(out), "Loading checksum database") {
+		t.Errorf("Expected CLI -verbose=false to override config, got: %s", out)
+	}
 }
 
 func TestProcessResultsUpdateDeletedFile(t *testing.T) {
@@ -1120,6 +1180,100 @@ func TestLockDBFile(t *testing.T) {
 		t.Fatalf("Failed to acquire lock after release: %v", err)
 	}
 	unlockDBFile(f2)
+}
+
+func TestLoadConfig(t *testing.T) {
+	tempFile, err := os.CreateTemp("", "config-*.toml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	content := `directories = ["/home/user/photos", "/home/user/docs"]
+workers = 8
+verbose = true
+`
+	if _, err := tempFile.Write([]byte(content)); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	tempFile.Close()
+
+	cfg, err := loadConfig(tempFile.Name())
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if len(cfg.Directories) != 2 {
+		t.Errorf("Expected 2 directories, got %d", len(cfg.Directories))
+	}
+	if cfg.Directories[0] != "/home/user/photos" {
+		t.Errorf("Expected /home/user/photos, got %s", cfg.Directories[0])
+	}
+	if cfg.Directories[1] != "/home/user/docs" {
+		t.Errorf("Expected /home/user/docs, got %s", cfg.Directories[1])
+	}
+	if cfg.Workers != 8 {
+		t.Errorf("Expected workers=8, got %d", cfg.Workers)
+	}
+	if !cfg.Verbose {
+		t.Error("Expected verbose=true")
+	}
+}
+
+func TestLoadConfigMissing(t *testing.T) {
+	cfg, err := loadConfig("/nonexistent/path/config.toml")
+	if err != nil {
+		t.Fatalf("Expected no error for missing config, got: %v", err)
+	}
+	if len(cfg.Directories) != 0 {
+		t.Errorf("Expected empty directories, got %d", len(cfg.Directories))
+	}
+	if cfg.Workers != 0 {
+		t.Errorf("Expected workers=0, got %d", cfg.Workers)
+	}
+	if cfg.Verbose {
+		t.Error("Expected verbose=false")
+	}
+}
+
+func TestLoadConfigInvalid(t *testing.T) {
+	tempFile, err := os.CreateTemp("", "config-*.toml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	if _, err := tempFile.Write([]byte("{{invalid toml!!")); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+	tempFile.Close()
+
+	_, err = loadConfig(tempFile.Name())
+	if err == nil {
+		t.Error("Expected error for invalid TOML, got nil")
+	}
+}
+
+func TestLoadConfigEmptyPath(t *testing.T) {
+	cfg, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("Expected no error for empty path, got: %v", err)
+	}
+	if cfg.Workers != 0 {
+		t.Errorf("Expected zero-value config, got workers=%d", cfg.Workers)
+	}
+}
+
+func TestDefaultConfigPath(t *testing.T) {
+	path := defaultConfigPath()
+	if path == "" {
+		t.Error("defaultConfigPath returned empty string")
+	}
+	if !strings.Contains(path, "checksumtool") {
+		t.Errorf("Expected path to contain 'checksumtool', got %s", path)
+	}
+	if !strings.HasSuffix(path, "config.toml") {
+		t.Errorf("Expected path to end with config.toml, got %s", path)
+	}
 }
 
 func TestWalkDirectoriesForMissingSymlinkDir(t *testing.T) {

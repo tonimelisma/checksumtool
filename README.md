@@ -12,6 +12,7 @@ My personal use case is to detect bit rot in any pictures. Throughout the years 
 - List files that are missing from the checksum database
 - Add checksums for missing files to the database
 - List and remove deleted files from the database
+- Optional TOML config file for default directories, workers, and verbose settings
 - Progress tracking and estimation of remaining time
 - Interrupt handling to save work done so far
 - Non-zero exit code on checksum mismatches in check mode
@@ -21,6 +22,7 @@ checksumtool [flags] [directories...]
 
 ### Flags
 - `-db string`: Checksum database file location (default `$HOME/.local/share/checksumtool/checksums.json`)
+- `-config string`: Config file location (default `$HOME/.config/checksumtool/config.toml`)
 - `-verbose`: Enable verbose output
 - `-mode string`: Operation mode: check, update, list-missing, add-missing, remove-deleted, list-deleted
 - `-workers int`: Number of worker goroutines (default 4)
@@ -67,6 +69,21 @@ List all files in the database that no longer exist on disk.
 `checksumtool -mode remove-deleted ~/Pictures`
 
 Remove deleted files under "Pictures" from the database.
+
+## Config File
+
+checksumtool supports an optional TOML config file at `~/.config/checksumtool/config.toml` (override with `-config`). All fields are optional:
+
+```toml
+directories = [
+    "/home/user/photos",
+    "/home/user/documents",
+]
+workers = 8
+verbose = true
+```
+
+**Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If the config file doesn't exist, defaults are used silently.
 
 ## Breaking Changes (v2)
 

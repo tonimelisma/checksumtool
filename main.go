@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/cespare/xxhash/v2"
 )
 
@@ -430,6 +431,35 @@ func updateProgressBar(done <-chan struct{}, totalFiles int, processedFiles *uin
 	}
 }
 
+type Config struct {
+	Directories []string `toml:"directories"`
+	Workers     int      `toml:"workers"`
+	Verbose     bool     `toml:"verbose"`
+}
+
+func defaultConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "checksumtool", "config.toml")
+}
+
+func loadConfig(path string) (*Config, error) {
+	cfg := &Config{}
+	if path == "" {
+		return cfg, nil
+	}
+	_, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return cfg, nil
+	}
+	if _, err := toml.DecodeFile(path, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	return cfg, nil
+}
+
 func defaultDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -443,11 +473,34 @@ func main() {
 	var verbose bool
 	var mode string
 	var numWorkers int
+	var configPath string
 	flag.StringVar(&dbFilePath, "db", defaultDBPath(), "Checksum database file location")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose output")
 	flag.StringVar(&mode, "mode", "", "Operation mode: check, update, list-missing, add-missing, remove-deleted, list-deleted")
 	flag.IntVar(&numWorkers, "workers", 4, "Number of worker goroutines")
+	flag.StringVar(&configPath, "config", defaultConfigPath(), "Config file location")
 	flag.Parse()
+
+	// Load config file
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Track which flags were explicitly set on the command line
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
+
+	// Apply config values where CLI flags were not explicitly set
+	if !explicitFlags["workers"] && cfg.Workers > 0 {
+		numWorkers = cfg.Workers
+	}
+	if !explicitFlags["verbose"] {
+		verbose = cfg.Verbose
+	}
 
 	if numWorkers <= 0 {
 		fmt.Println("Error: -workers must be greater than 0")
@@ -460,6 +513,11 @@ func main() {
 	}
 
 	directories := flag.Args()
+
+	// If no CLI directories, use config directories
+	if len(directories) == 0 {
+		directories = cfg.Directories
+	}
 
 	if (mode == "list-missing" || mode == "add-missing") && len(directories) == 0 {
 		fmt.Printf("Error: %s mode requires at least one directory argument\n", mode)
