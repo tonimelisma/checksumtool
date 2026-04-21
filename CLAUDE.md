@@ -42,4 +42,8 @@ Every feature or change is complete when all of the following are satisfied:
 3. **Docs**: Update `README.md` (flags, usage examples, feature list) and `CLAUDE.md` (architecture notes)
 4. **Commit**: Create a git commit with a descriptive message
 5. **Push**: Push to the remote repository
-6. **Tag & Release**: If the change warrants a version bump, create a git tag (e.g. `v1.1.0`) and push it
+6. **Tag & Release**: User-facing changes should normally be released. Create and push a version tag for:
+   - Bug fixes and behavior corrections: patch release (for example `v1.1.1`)
+   - Backward-compatible features or meaningful UX improvements: minor release (for example `v1.2.0`)
+   - Breaking changes: major release
+   If a change is intentionally not being released yet, say that explicitly in the handoff instead of silently skipping the release step.
