@@ -13,6 +13,8 @@ go test -race -v                  # Run tests with race detector
 
 No Makefile, linter config, or CI pipeline exists — standard Go toolchain only.
 
+Tests must remain hermetic. Use `t.TempDir()`/temp fixtures, isolate `HOME` and default config/data paths for subprocess CLI tests, and avoid touching a developer's real checksum database or config while running the suite.
+
 ## Architecture
 
 Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by computing xxhash64 checksums and storing them in a JSON database. External dependencies: `github.com/cespare/xxhash/v2`, `github.com/BurntSushi/toml`.

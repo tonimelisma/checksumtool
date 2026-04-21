@@ -15,20 +15,65 @@ import (
 	"time"
 )
 
+func missingPath(t *testing.T, elems ...string) string {
+	t.Helper()
+
+	parts := append([]string{t.TempDir()}, elems...)
+	return filepath.Join(parts...)
+}
+
+func writeTestFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("Failed to create directory for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("Failed to write %s: %v", path, err)
+	}
+}
+
+func setHermeticHome(t *testing.T) string {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	return home
+}
+
+func hermeticCommand(t *testing.T, name string, args ...string) *exec.Cmd {
+	t.Helper()
+
+	home := t.TempDir()
+	cmd := exec.Command(name, args...)
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		switch {
+		case strings.HasPrefix(entry, "HOME="),
+			strings.HasPrefix(entry, "XDG_CONFIG_HOME="),
+			strings.HasPrefix(entry, "XDG_DATA_HOME="):
+			continue
+		default:
+			env = append(env, entry)
+		}
+	}
+	env = append(env,
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+	)
+	cmd.Env = env
+	return cmd
+}
+
 func TestCalculateChecksum(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "testfile")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
-
+	tempFile := filepath.Join(t.TempDir(), "testfile.txt")
 	content := []byte("Hello, world!")
-	if _, err := tempFile.Write(content); err != nil {
-		t.Fatalf("Failed to write content to temporary file: %v", err)
-	}
-	tempFile.Close()
+	writeTestFile(t, tempFile, content)
 
-	checksum, err := calculateChecksum(tempFile.Name())
+	checksum, err := calculateChecksum(tempFile)
 	if err != nil {
 		t.Fatalf("Failed to calculate checksum: %v", err)
 	}
@@ -40,23 +85,15 @@ func TestCalculateChecksum(t *testing.T) {
 }
 
 func TestWorker(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	tempFile, err := os.CreateTemp(tempDir, "testfile")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	tempFile.Close()
+	tempDir := t.TempDir()
+	tempFile := filepath.Join(tempDir, "testfile.txt")
+	writeTestFile(t, tempFile, []byte("worker"))
 
 	jobs := make(chan string, 1)
 	results := make(chan WorkerResult, 1)
 	var wg sync.WaitGroup
 
-	jobs <- tempFile.Name()
+	jobs <- tempFile
 	close(jobs)
 
 	wg.Add(1)
@@ -66,8 +103,8 @@ func TestWorker(t *testing.T) {
 
 	result := <-results
 
-	if result.FilePath != tempFile.Name() {
-		t.Errorf("Expected file path %s, got %s", tempFile.Name(), result.FilePath)
+	if result.FilePath != tempFile {
+		t.Errorf("Expected file path %s, got %s", tempFile, result.FilePath)
 	}
 	if !result.Exists {
 		t.Error("Expected Exists to be true for an existing file")
@@ -78,11 +115,12 @@ func TestWorker(t *testing.T) {
 }
 
 func TestWorkerMissingFile(t *testing.T) {
+	missingFile := missingPath(t, "missing", "file.txt")
 	jobs := make(chan string, 1)
 	results := make(chan WorkerResult, 1)
 	var wg sync.WaitGroup
 
-	jobs <- "/nonexistent/file/path"
+	jobs <- missingFile
 	close(jobs)
 
 	wg.Add(1)
@@ -92,8 +130,8 @@ func TestWorkerMissingFile(t *testing.T) {
 
 	result := <-results
 
-	if result.FilePath != "/nonexistent/file/path" {
-		t.Errorf("Expected file path /nonexistent/file/path, got %s", result.FilePath)
+	if result.FilePath != missingFile {
+		t.Errorf("Expected file path %s, got %s", missingFile, result.FilePath)
 	}
 	if result.Exists {
 		t.Error("Expected Exists to be false for a missing file")
@@ -101,26 +139,16 @@ func TestWorkerMissingFile(t *testing.T) {
 }
 
 func TestWorkerError(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
+	tempFile := filepath.Join(t.TempDir(), "not-a-regular-file")
+	if err := os.Mkdir(tempFile, 0o755); err != nil {
+		t.Fatalf("Failed to create directory fixture: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
-
-	tempFile, err := os.CreateTemp(tempDir, "testfile")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	tempFile.Close()
-
-	// Make file unreadable
-	os.Chmod(tempFile.Name(), 0000)
 
 	jobs := make(chan string, 1)
 	results := make(chan WorkerResult, 1)
 	var wg sync.WaitGroup
 
-	jobs <- tempFile.Name()
+	jobs <- tempFile
 	close(jobs)
 
 	wg.Add(1)
@@ -131,7 +159,7 @@ func TestWorkerError(t *testing.T) {
 	result := <-results
 
 	if result.Err == nil {
-		t.Error("Expected an error for unreadable file")
+		t.Error("Expected an error for a directory entry")
 	}
 }
 
@@ -140,19 +168,11 @@ func TestLoadChecksumDB(t *testing.T) {
 	file1Path := filepath.Join(tempDir, "file1")
 	file2Path := filepath.Join(tempDir, "file2")
 
-	tempFile, err := os.CreateTemp("", "testdb")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
-
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 	content := []byte(fmt.Sprintf(`{"checksums":{"%s":1234,"%s":5678}}`, file1Path, file2Path))
-	if _, err := tempFile.Write(content); err != nil {
-		t.Fatalf("Failed to write content to temporary file: %v", err)
-	}
-	tempFile.Close()
+	writeTestFile(t, dbPath, content)
 
-	checksumDB, err := loadChecksumDB(tempFile.Name(), false)
+	checksumDB, err := loadChecksumDB(dbPath, false)
 	if err != nil {
 		t.Fatalf("Failed to load checksum database: %v", err)
 	}
@@ -168,7 +188,7 @@ func TestLoadChecksumDB(t *testing.T) {
 }
 
 func TestLoadChecksumDBMissing(t *testing.T) {
-	checksumDB, err := loadChecksumDB("/nonexistent/path/db.json", false)
+	checksumDB, err := loadChecksumDB(missingPath(t, "missing", "db.json"), false)
 	if err != nil {
 		t.Fatalf("Expected no error for missing DB file, got: %v", err)
 	}
@@ -178,19 +198,10 @@ func TestLoadChecksumDBMissing(t *testing.T) {
 }
 
 func TestLoadChecksumDBCorrupt(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "testdb")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
+	dbPath := filepath.Join(t.TempDir(), "corrupt.json")
+	writeTestFile(t, dbPath, []byte(`{invalid json!!!`))
 
-	content := []byte(`{invalid json!!!`)
-	if _, err := tempFile.Write(content); err != nil {
-		t.Fatalf("Failed to write content to temporary file: %v", err)
-	}
-	tempFile.Close()
-
-	_, err = loadChecksumDB(tempFile.Name(), false)
+	_, err := loadChecksumDB(dbPath, false)
 	if err == nil {
 		t.Error("Expected an error for corrupt database file, got nil")
 	}
@@ -210,19 +221,11 @@ func TestLoadChecksumDBNormalizesRelativePaths(t *testing.T) {
 		t.Fatalf("Failed to create relative path: %v", err)
 	}
 
-	tempFile, err := os.CreateTemp("", "testdb")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
-
+	dbPath := filepath.Join(t.TempDir(), "legacy.json")
 	content := []byte(fmt.Sprintf(`{"checksums":{"%s":1234}}`, relPath))
-	if _, err := tempFile.Write(content); err != nil {
-		t.Fatalf("Failed to write content to temporary file: %v", err)
-	}
-	tempFile.Close()
+	writeTestFile(t, dbPath, content)
 
-	checksumDB, err := loadChecksumDB(tempFile.Name(), false)
+	checksumDB, err := loadChecksumDB(dbPath, false)
 	if err != nil {
 		t.Fatalf("Failed to load checksum database: %v", err)
 	}
@@ -239,27 +242,15 @@ func TestLoadChecksumDBNormalizesRelativePaths(t *testing.T) {
 }
 
 func TestGetFilesToProcess(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	file1, err := os.CreateTemp(tempDir, "file1")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	file1.Close()
-
-	file2, err := os.CreateTemp(tempDir, "file2")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	file2.Close()
+	tempDir := t.TempDir()
+	file1 := filepath.Join(tempDir, "file1.txt")
+	file2 := filepath.Join(tempDir, "file2.txt")
+	writeTestFile(t, file1, []byte("file1"))
+	writeTestFile(t, file2, []byte("file2"))
 
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]uint64{
-			file1.Name(): 1234,
+			file1: 1234,
 		},
 	}
 
@@ -268,7 +259,7 @@ func TestGetFilesToProcess(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected error in 'check' mode: %v", err)
 	}
-	expectedFiles := []string{file1.Name()}
+	expectedFiles := []string{file1}
 	if !reflect.DeepEqual(files, expectedFiles) {
 		t.Errorf("File list mismatch in 'check' mode. Expected: %v, Got: %v", expectedFiles, files)
 	}
@@ -281,7 +272,7 @@ func TestGetFilesToProcess(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected error in 'update' mode: %v", err)
 	}
-	expectedFiles = []string{file1.Name()}
+	expectedFiles = []string{file1}
 	if !reflect.DeepEqual(files, expectedFiles) {
 		t.Errorf("File list mismatch in 'update' mode. Expected: %v, Got: %v", expectedFiles, files)
 	}
@@ -294,7 +285,7 @@ func TestGetFilesToProcess(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected error in 'list-missing' mode: %v", err)
 	}
-	expectedFiles = []string{file2.Name()}
+	expectedFiles = []string{file2}
 	if !reflect.DeepEqual(files, expectedFiles) {
 		t.Errorf("File list mismatch in 'list-missing' mode. Expected: %v, Got: %v", expectedFiles, files)
 	}
@@ -307,7 +298,7 @@ func TestGetFilesToProcess(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected error in 'add-missing' mode: %v", err)
 	}
-	expectedFiles = []string{file2.Name()}
+	expectedFiles = []string{file2}
 	if !reflect.DeepEqual(files, expectedFiles) {
 		t.Errorf("File list mismatch in 'add-missing' mode. Expected: %v, Got: %v", expectedFiles, files)
 	}
@@ -320,7 +311,7 @@ func TestGetFilesToProcess(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unexpected error in 'remove-deleted' mode: %v", err)
 	}
-	expectedFiles = []string{file1.Name()}
+	expectedFiles = []string{file1}
 	if !reflect.DeepEqual(files, expectedFiles) {
 		t.Errorf("File list mismatch in 'remove-deleted' mode. Expected: %v, Got: %v", expectedFiles, files)
 	}
@@ -336,17 +327,15 @@ func TestGetFilesToProcess(t *testing.T) {
 }
 
 func TestGetFilesToProcessDirectoryFilter(t *testing.T) {
-	tempDir1, err := os.MkdirTemp("", "testdir1")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
+	rootDir := t.TempDir()
+	tempDir1 := filepath.Join(rootDir, "dir1")
+	tempDir2 := filepath.Join(rootDir, "dir2")
+	if err := os.MkdirAll(tempDir1, 0o755); err != nil {
+		t.Fatalf("Failed to create directory %s: %v", tempDir1, err)
 	}
-	defer os.RemoveAll(tempDir1)
-
-	tempDir2, err := os.MkdirTemp("", "testdir2")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
+	if err := os.MkdirAll(tempDir2, 0o755); err != nil {
+		t.Fatalf("Failed to create directory %s: %v", tempDir2, err)
 	}
-	defer os.RemoveAll(tempDir2)
 
 	absDir1, _ := filepath.Abs(tempDir1)
 	absDir2, _ := filepath.Abs(tempDir2)
@@ -383,11 +372,7 @@ func TestGetFilesToProcessDirectoryFilter(t *testing.T) {
 }
 
 func TestSaveChecksumDB(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "testdb")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]uint64{
@@ -396,12 +381,12 @@ func TestSaveChecksumDB(t *testing.T) {
 		},
 	}
 
-	err = saveChecksumDB(tempFile.Name(), checksumDB, false)
+	err := saveChecksumDB(dbPath, checksumDB, false)
 	if err != nil {
 		t.Fatalf("Failed to save checksum database: %v", err)
 	}
 
-	content, err := os.ReadFile(tempFile.Name())
+	content, err := os.ReadFile(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to read saved checksum database file: %v", err)
 	}
@@ -425,18 +410,12 @@ func TestSaveChecksumDB(t *testing.T) {
 }
 
 func TestSaveChecksumDBPermissions(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	dbPath := filepath.Join(tempDir, "sub", "checksums.json")
+	dbPath := filepath.Join(t.TempDir(), "sub", "checksums.json")
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]uint64{"file1": 1234},
 	}
 
-	err = saveChecksumDB(dbPath, checksumDB, false)
+	err := saveChecksumDB(dbPath, checksumDB, false)
 	if err != nil {
 		t.Fatalf("Failed to save checksum database: %v", err)
 	}
@@ -571,18 +550,14 @@ func TestProcessResultsMismatchCount(t *testing.T) {
 }
 
 func TestFileExists(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "testfile")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
-	tempFile.Close()
+	tempFile := filepath.Join(t.TempDir(), "testfile.txt")
+	writeTestFile(t, tempFile, []byte("exists"))
 
-	if !fileExists(tempFile.Name()) {
+	if !fileExists(tempFile) {
 		t.Error("Expected fileExists to return true for an existing file")
 	}
 
-	if fileExists("nonexistent_file") {
+	if fileExists(missingPath(t, "missing", "file.txt")) {
 		t.Error("Expected fileExists to return false for a nonexistent file")
 	}
 }
@@ -610,27 +585,15 @@ func TestIsUnderDir(t *testing.T) {
 }
 
 func TestWalkDirectoriesForMissing(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	file1, err := os.CreateTemp(tempDir, "file1")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	file1.Close()
-
-	file2, err := os.CreateTemp(tempDir, "file2")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	file2.Close()
+	tempDir := t.TempDir()
+	file1 := filepath.Join(tempDir, "file1.txt")
+	file2 := filepath.Join(tempDir, "file2.txt")
+	writeTestFile(t, file1, []byte("file1"))
+	writeTestFile(t, file2, []byte("file2"))
 
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]uint64{
-			file1.Name(): 1234,
+			file1: 1234,
 		},
 	}
 
@@ -639,8 +602,8 @@ func TestWalkDirectoriesForMissing(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	if len(files) != 1 || files[0] != file2.Name() {
-		t.Errorf("Expected [%s], got %v", file2.Name(), files)
+	if len(files) != 1 || files[0] != file2 {
+		t.Errorf("Expected [%s], got %v", file2, files)
 	}
 }
 
@@ -663,7 +626,7 @@ func TestFormatDuration(t *testing.T) {
 }
 
 func TestCalculateChecksumNonexistent(t *testing.T) {
-	_, err := calculateChecksum("/nonexistent/file/path")
+	_, err := calculateChecksum(missingPath(t, "missing", "file.txt"))
 	if err == nil {
 		t.Error("Expected an error for nonexistent file")
 	}
@@ -671,19 +634,10 @@ func TestCalculateChecksumNonexistent(t *testing.T) {
 
 func TestLoadChecksumDBVerbose(t *testing.T) {
 	// Test verbose with existing DB
-	tempFile, err := os.CreateTemp("", "testdb")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+	writeTestFile(t, dbPath, []byte(`{"checksums":{"file1":1234}}`))
 
-	content := []byte(`{"checksums":{"file1":1234}}`)
-	if _, err := tempFile.Write(content); err != nil {
-		t.Fatalf("Failed to write: %v", err)
-	}
-	tempFile.Close()
-
-	db, err := loadChecksumDB(tempFile.Name(), true)
+	db, err := loadChecksumDB(dbPath, true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -692,7 +646,7 @@ func TestLoadChecksumDBVerbose(t *testing.T) {
 	}
 
 	// Test verbose with missing DB
-	db, err = loadChecksumDB("/nonexistent/path/db.json", true)
+	db, err = loadChecksumDB(missingPath(t, "missing", "db.json"), true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -702,29 +656,27 @@ func TestLoadChecksumDBVerbose(t *testing.T) {
 }
 
 func TestSaveChecksumDBVerbose(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "testdb")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]uint64{"file1": 1234},
 	}
 
-	err = saveChecksumDB(tempFile.Name(), checksumDB, true)
+	err := saveChecksumDB(dbPath, checksumDB, true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
 
 func TestSaveChecksumDBWriteError(t *testing.T) {
-	// Use a path under /dev/null which can't have children
-	err := saveChecksumDB("/dev/null/impossible/path/db.json", &ChecksumDB{
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	writeTestFile(t, blocker, []byte("not a directory"))
+
+	err := saveChecksumDB(filepath.Join(blocker, "db.json"), &ChecksumDB{
 		Checksums: map[string]uint64{"file1": 1234},
 	}, false)
 	if err == nil {
-		t.Error("Expected an error for impossible path")
+		t.Error("Expected an error when the database parent path is a file")
 	}
 }
 
@@ -776,45 +728,37 @@ func TestProcessResultsWithError(t *testing.T) {
 }
 
 func TestLoadChecksumDBUnreadable(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "testdb")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
+	dbPath := filepath.Join(t.TempDir(), "db-dir")
+	if err := os.Mkdir(dbPath, 0o755); err != nil {
+		t.Fatalf("Failed to create directory fixture: %v", err)
 	}
-	defer os.Remove(tempFile.Name())
-	tempFile.Write([]byte(`{"checksums":{}}`))
-	tempFile.Close()
 
-	os.Chmod(tempFile.Name(), 0000)
-
-	_, err = loadChecksumDB(tempFile.Name(), false)
+	_, err := loadChecksumDB(dbPath, false)
 	if err == nil {
-		t.Error("Expected an error for unreadable database file")
+		t.Error("Expected an error for a database path that is a directory")
 	}
 }
 
-func TestSaveChecksumDBReadOnlyDir(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Make directory read-only so WriteFile fails
-	os.Chmod(tempDir, 0555)
-
+func TestSaveChecksumDBTargetIsDirectory(t *testing.T) {
+	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "checksums.json")
+	if err := os.Mkdir(dbPath, 0o755); err != nil {
+		t.Fatalf("Failed to create directory fixture: %v", err)
+	}
+
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]uint64{"file1": 1234},
 	}
-	err = saveChecksumDB(dbPath, checksumDB, false)
+	err := saveChecksumDB(dbPath, checksumDB, false)
 	if err == nil {
-		t.Error("Expected an error writing to read-only directory")
+		t.Error("Expected an error when the database target path is a directory")
 	}
 }
 
 func TestGetFilesToProcessDeletedDirectoryFilter(t *testing.T) {
-	absDir1, _ := filepath.Abs("/tmp/testdir_a")
-	absDir2, _ := filepath.Abs("/tmp/testdir_b")
+	rootDir := t.TempDir()
+	absDir1 := filepath.Join(rootDir, "testdir_a")
+	absDir2 := filepath.Join(rootDir, "testdir_b")
 	file1Path := filepath.Join(absDir1, "file1.txt")
 	file2Path := filepath.Join(absDir2, "file2.txt")
 
@@ -826,7 +770,7 @@ func TestGetFilesToProcessDeletedDirectoryFilter(t *testing.T) {
 	}
 
 	// remove-deleted with directory filter
-	files, calc, err := getFilesToProcess("remove-deleted", []string{"/tmp/testdir_a"}, checksumDB)
+	files, calc, err := getFilesToProcess("remove-deleted", []string{absDir1}, checksumDB)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -850,7 +794,7 @@ func TestGetFilesToProcessDeletedDirectoryFilter(t *testing.T) {
 	}
 
 	// list-deleted with directory filter
-	files, _, err = getFilesToProcess("list-deleted", []string{"/tmp/testdir_b"}, checksumDB)
+	files, _, err = getFilesToProcess("list-deleted", []string{absDir2}, checksumDB)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -875,22 +819,18 @@ func TestGetFilesToProcessRequiresDirectories(t *testing.T) {
 
 func TestWalkDirectoriesForMissingError(t *testing.T) {
 	checksumDB := &ChecksumDB{Checksums: make(map[string]uint64)}
-	_, err := walkDirectoriesForMissing([]string{"/nonexistent/directory"}, checksumDB)
+	_, err := walkDirectoriesForMissing([]string{missingPath(t, "missing", "directory")}, checksumDB)
 	if err == nil {
 		t.Error("Expected an error for nonexistent directory")
 	}
 }
 
 func TestDefaultDBPath(t *testing.T) {
+	home := setHermeticHome(t)
 	path := defaultDBPath()
-	if path == "" {
-		t.Error("defaultDBPath returned empty string")
-	}
-	if !strings.Contains(path, "checksumtool") {
-		t.Errorf("Expected path to contain 'checksumtool', got %s", path)
-	}
-	if !strings.HasSuffix(path, "checksums.json") {
-		t.Errorf("Expected path to end with checksums.json, got %s", path)
+	expected := filepath.Join(home, ".local", "share", "checksumtool", "checksums.json")
+	if path != expected {
+		t.Errorf("Expected defaultDBPath to use hermetic home.\nexpected: %s\ngot: %s", expected, path)
 	}
 }
 
@@ -913,24 +853,15 @@ func TestUpdateProgressBar(t *testing.T) {
 }
 
 func TestWorkerNoChecksum(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	tempFile, err := os.CreateTemp(tempDir, "testfile")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	tempFile.Write([]byte("content"))
-	tempFile.Close()
+	tempDir := t.TempDir()
+	tempFile := filepath.Join(tempDir, "testfile.txt")
+	writeTestFile(t, tempFile, []byte("content"))
 
 	jobs := make(chan string, 1)
 	results := make(chan WorkerResult, 1)
 	var wg sync.WaitGroup
 
-	jobs <- tempFile.Name()
+	jobs <- tempFile
 	close(jobs)
 
 	wg.Add(1)
@@ -955,7 +886,7 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// Test: no mode flag
-	cmd := exec.Command(binPath)
+	cmd := hermeticCommand(t, binPath)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Error("Expected non-zero exit for missing -mode flag")
@@ -965,7 +896,7 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// Test: invalid workers
-	cmd = exec.Command(binPath, "-workers", "0", "-mode", "check")
+	cmd = hermeticCommand(t, binPath, "-workers", "0", "-mode", "check")
 	out, err = cmd.CombinedOutput()
 	if err == nil {
 		t.Error("Expected non-zero exit for -workers 0")
@@ -975,7 +906,7 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// Test: list-missing without directories
-	cmd = exec.Command(binPath, "-mode", "list-missing")
+	cmd = hermeticCommand(t, binPath, "-mode", "list-missing")
 	out, err = cmd.CombinedOutput()
 	if err == nil {
 		t.Error("Expected non-zero exit for list-missing without dirs")
@@ -985,7 +916,7 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// Test: add-missing without directories
-	cmd = exec.Command(binPath, "-mode", "add-missing")
+	cmd = hermeticCommand(t, binPath, "-mode", "add-missing")
 	out, err = cmd.CombinedOutput()
 	if err == nil {
 		t.Error("Expected non-zero exit for add-missing without dirs")
@@ -993,7 +924,7 @@ func TestMainBinary(t *testing.T) {
 
 	// Test: check mode with no DB (should succeed, 0 files)
 	dbPath := filepath.Join(t.TempDir(), "test.json")
-	cmd = exec.Command(binPath, "-mode", "check", "-db", dbPath)
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", dbPath)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected success for check with empty DB, got: %v\n%s", err, out)
@@ -1001,8 +932,11 @@ func TestMainBinary(t *testing.T) {
 
 	// Test: corrupt DB file
 	corruptDB := filepath.Join(t.TempDir(), "corrupt.json")
-	os.WriteFile(corruptDB, []byte("{bad json!"), 0600)
-	cmd = exec.Command(binPath, "-mode", "check", "-db", corruptDB)
+	writeTestFile(t, corruptDB, []byte("{bad json!"))
+	if err := os.Chmod(corruptDB, 0o600); err != nil {
+		t.Fatalf("Failed to chmod corrupt DB: %v", err)
+	}
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", corruptDB)
 	out, err = cmd.CombinedOutput()
 	if err == nil {
 		t.Error("Expected non-zero exit for corrupt DB")
@@ -1014,10 +948,10 @@ func TestMainBinary(t *testing.T) {
 	// Test: add-missing populates DB, check detects mismatch
 	testDir := t.TempDir()
 	testFile := filepath.Join(testDir, "hello.txt")
-	os.WriteFile(testFile, []byte("hello"), 0644)
+	writeTestFile(t, testFile, []byte("hello"))
 	freshDB := filepath.Join(t.TempDir(), "fresh.json")
 
-	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", freshDB, testDir)
+	cmd = hermeticCommand(t, binPath, "-mode", "add-missing", "-db", freshDB, testDir)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected success for add-missing, got: %v\n%s", err, out)
@@ -1029,15 +963,15 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// Check should pass
-	cmd = exec.Command(binPath, "-mode", "check", "-db", freshDB, testDir)
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", freshDB, testDir)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected check to pass, got: %v\n%s", err, out)
 	}
 
 	// Modify file, check should fail with exit 1
-	os.WriteFile(testFile, []byte("modified"), 0644)
-	cmd = exec.Command(binPath, "-mode", "check", "-db", freshDB, testDir)
+	writeTestFile(t, testFile, []byte("modified"))
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", freshDB, testDir)
 	out, err = cmd.CombinedOutput()
 	if err == nil {
 		t.Error("Expected non-zero exit for checksum mismatch")
@@ -1047,43 +981,43 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// Test: verbose mode
-	cmd = exec.Command(binPath, "-mode", "check", "-db", freshDB, "-verbose", testDir)
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", freshDB, "-verbose", testDir)
 	out, err = cmd.CombinedOutput()
 	// Will exit 1 due to mismatch, but should have verbose output
 	if !strings.Contains(string(out), "Loading checksum database") {
 		t.Errorf("Expected verbose output, got: %s", out)
 	}
 
-	// Test: update mode with unreadable file should exit non-zero
+	// Test: update mode with a database entry that points at a directory
+	// should exit non-zero without relying on production paths or chmod.
 	errDir := t.TempDir()
-	errFile := filepath.Join(errDir, "unreadable.txt")
-	os.WriteFile(errFile, []byte("data"), 0644)
-	errDB := filepath.Join(t.TempDir(), "err.json")
-	// First add the file
-	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", errDB, errDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("Failed to add-missing: %v\n%s", err, out)
+	errPath := filepath.Join(errDir, "dir-entry")
+	if err := os.Mkdir(errPath, 0o755); err != nil {
+		t.Fatalf("Failed to create directory fixture: %v", err)
 	}
-	// Make it unreadable, then update should fail
-	os.Chmod(errFile, 0000)
-	cmd = exec.Command(binPath, "-mode", "update", "-db", errDB, errDir)
+	errDB := filepath.Join(t.TempDir(), "err.json")
+	writeTestFile(t, errDB, []byte(fmt.Sprintf(`{"checksums":{"%s":1234}}`, errPath)))
+
+	cmd = hermeticCommand(t, binPath, "-mode", "update", "-db", errDB, errDir)
 	out, err = cmd.CombinedOutput()
-	os.Chmod(errFile, 0644) // restore for cleanup
 	if err == nil {
-		t.Error("Expected non-zero exit for update mode with unreadable file")
+		t.Error("Expected non-zero exit for update mode when a DB entry points at a directory")
+	}
+	if !strings.Contains(string(out), "Error processing file") {
+		t.Errorf("Expected update error output, got: %s", out)
 	}
 
 	// Test: config file provides directories
 	cfgDir := t.TempDir()
 	cfgTestDir := t.TempDir()
 	cfgTestFile := filepath.Join(cfgTestDir, "cfgfile.txt")
-	os.WriteFile(cfgTestFile, []byte("config test"), 0644)
+	writeTestFile(t, cfgTestFile, []byte("config test"))
 	cfgDB := filepath.Join(t.TempDir(), "cfg.json")
 	cfgFile := filepath.Join(cfgDir, "config.toml")
-	os.WriteFile(cfgFile, []byte(fmt.Sprintf("directories = [%q]\n", cfgTestDir)), 0644)
+	writeTestFile(t, cfgFile, []byte(fmt.Sprintf("directories = [%q]\n", cfgTestDir)))
 
 	// add-missing using config file directories (no CLI dirs)
-	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", cfgDB, "-config", cfgFile)
+	cmd = hermeticCommand(t, binPath, "-mode", "add-missing", "-db", cfgDB, "-config", cfgFile)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected success for add-missing with config dirs, got: %v\n%s", err, out)
@@ -1093,14 +1027,14 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// check using config file directories should pass
-	cmd = exec.Command(binPath, "-mode", "check", "-db", cfgDB, "-config", cfgFile)
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", cfgDB, "-config", cfgFile)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected check to pass with config dirs, got: %v\n%s", err, out)
 	}
 
 	// Test: missing config file should silently use defaults
-	cmd = exec.Command(binPath, "-mode", "check", "-db", dbPath, "-config", "/nonexistent/config.toml")
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", dbPath, "-config", missingPath(t, "missing", "config.toml"))
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected success with missing config file, got: %v\n%s", err, out)
@@ -1108,8 +1042,8 @@ func TestMainBinary(t *testing.T) {
 
 	// Test: invalid config file should error
 	badCfg := filepath.Join(t.TempDir(), "bad.toml")
-	os.WriteFile(badCfg, []byte("{{invalid!!"), 0644)
-	cmd = exec.Command(binPath, "-mode", "check", "-db", dbPath, "-config", badCfg)
+	writeTestFile(t, badCfg, []byte("{{invalid!!"))
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", dbPath, "-config", badCfg)
 	out, err = cmd.CombinedOutput()
 	if err == nil {
 		t.Error("Expected non-zero exit for invalid config file")
@@ -1117,8 +1051,8 @@ func TestMainBinary(t *testing.T) {
 
 	// Test: config with workers and verbose
 	cfgWithOpts := filepath.Join(t.TempDir(), "opts.toml")
-	os.WriteFile(cfgWithOpts, []byte("workers = 2\nverbose = true\n"), 0644)
-	cmd = exec.Command(binPath, "-mode", "check", "-db", cfgDB, "-config", cfgWithOpts)
+	writeTestFile(t, cfgWithOpts, []byte("workers = 2\nverbose = true\n"))
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", cfgDB, "-config", cfgWithOpts)
 	out, err = cmd.CombinedOutput()
 	// Should have verbose output from config
 	if !strings.Contains(string(out), "Loading checksum database") {
@@ -1126,7 +1060,7 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	// Test: CLI flags override config
-	cmd = exec.Command(binPath, "-mode", "check", "-db", cfgDB, "-config", cfgWithOpts, "-verbose=false")
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", cfgDB, "-config", cfgWithOpts, "-verbose=false")
 	out, err = cmd.CombinedOutput()
 	if strings.Contains(string(out), "Loading checksum database") {
 		t.Errorf("Expected CLI -verbose=false to override config, got: %s", out)
@@ -1136,7 +1070,7 @@ func TestMainBinary(t *testing.T) {
 	// a legacy relative path and the user scopes the check to a directory.
 	legacyDir := t.TempDir()
 	legacyFile := filepath.Join(legacyDir, "legacy.txt")
-	os.WriteFile(legacyFile, []byte("legacy"), 0644)
+	writeTestFile(t, legacyFile, []byte("legacy"))
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -1150,13 +1084,16 @@ func TestMainBinary(t *testing.T) {
 
 	legacyDB := filepath.Join(t.TempDir(), "legacy.json")
 	legacyJSON := fmt.Sprintf(`{"checksums":{"%s":1234}}`, legacyRelativePath)
-	os.WriteFile(legacyDB, []byte(legacyJSON), 0600)
+	writeTestFile(t, legacyDB, []byte(legacyJSON))
+	if err := os.Chmod(legacyDB, 0o600); err != nil {
+		t.Fatalf("Failed to chmod legacy DB: %v", err)
+	}
 
 	if err := os.Remove(legacyFile); err != nil {
 		t.Fatalf("Failed to delete legacy test file: %v", err)
 	}
 
-	cmd = exec.Command(binPath, "-mode", "list-deleted", "-db", legacyDB, legacyDir)
+	cmd = hermeticCommand(t, binPath, "-mode", "list-deleted", "-db", legacyDB, legacyDir)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected success for list-deleted with legacy DB entry, got: %v\n%s", err, out)
@@ -1172,15 +1109,15 @@ func TestMainBinary(t *testing.T) {
 	filteredFile := filepath.Join(filteredDir, "filtered.txt")
 	unfilteredFile := filepath.Join(unfilteredDir, "unfiltered.txt")
 
-	os.WriteFile(filteredFile, []byte("filtered"), 0644)
-	os.WriteFile(unfilteredFile, []byte("unfiltered"), 0644)
+	writeTestFile(t, filteredFile, []byte("filtered"))
+	writeTestFile(t, unfilteredFile, []byte("unfiltered"))
 
 	configFilteredDB := filepath.Join(t.TempDir(), "filtered.json")
-	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", configFilteredDB, filteredDir)
+	cmd = hermeticCommand(t, binPath, "-mode", "add-missing", "-db", configFilteredDB, filteredDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to add filtered dir: %v\n%s", err, out)
 	}
-	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", configFilteredDB, unfilteredDir)
+	cmd = hermeticCommand(t, binPath, "-mode", "add-missing", "-db", configFilteredDB, unfilteredDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to add unfiltered dir: %v\n%s", err, out)
 	}
@@ -1194,11 +1131,9 @@ func TestMainBinary(t *testing.T) {
 
 	configWithDirs := filepath.Join(t.TempDir(), "dirs.toml")
 	configBody := fmt.Sprintf("directories = [%q]\n", filteredDir)
-	if err := os.WriteFile(configWithDirs, []byte(configBody), 0644); err != nil {
-		t.Fatalf("Failed to write config file: %v", err)
-	}
+	writeTestFile(t, configWithDirs, []byte(configBody))
 
-	cmd = exec.Command(binPath, "-mode", "list-deleted", "-db", configFilteredDB, "-config", configWithDirs)
+	cmd = hermeticCommand(t, binPath, "-mode", "list-deleted", "-db", configFilteredDB, "-config", configWithDirs)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("Expected success for list-deleted with config directories, got: %v\n%s", err, out)
@@ -1236,13 +1171,7 @@ func TestProcessResultsUpdateDeletedFile(t *testing.T) {
 }
 
 func TestSaveChecksumDBAtomicValidJSON(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	dbPath := filepath.Join(tempDir, "checksums.json")
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]uint64{
 			"file1": 1234,
@@ -1250,7 +1179,7 @@ func TestSaveChecksumDBAtomicValidJSON(t *testing.T) {
 		},
 	}
 
-	err = saveChecksumDB(dbPath, checksumDB, false)
+	err := saveChecksumDB(dbPath, checksumDB, false)
 	if err != nil {
 		t.Fatalf("Failed to save: %v", err)
 	}
@@ -1272,13 +1201,7 @@ func TestSaveChecksumDBAtomicValidJSON(t *testing.T) {
 }
 
 func TestLockDBFile(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	dbPath := filepath.Join(tempDir, "checksums.json")
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 
 	// Acquire exclusive lock
 	f, err := lockDBFile(dbPath, true)
@@ -1304,22 +1227,14 @@ func TestLockDBFile(t *testing.T) {
 }
 
 func TestLoadConfig(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "config-*.toml")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
-
+	tempFile := filepath.Join(t.TempDir(), "config.toml")
 	content := `directories = ["/home/user/photos", "/home/user/docs"]
 workers = 8
 verbose = true
 `
-	if _, err := tempFile.Write([]byte(content)); err != nil {
-		t.Fatalf("Failed to write config: %v", err)
-	}
-	tempFile.Close()
+	writeTestFile(t, tempFile, []byte(content))
 
-	cfg, err := loadConfig(tempFile.Name())
+	cfg, err := loadConfig(tempFile)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -1341,7 +1256,7 @@ verbose = true
 }
 
 func TestLoadConfigMissing(t *testing.T) {
-	cfg, err := loadConfig("/nonexistent/path/config.toml")
+	cfg, err := loadConfig(missingPath(t, "missing", "config.toml"))
 	if err != nil {
 		t.Fatalf("Expected no error for missing config, got: %v", err)
 	}
@@ -1357,18 +1272,10 @@ func TestLoadConfigMissing(t *testing.T) {
 }
 
 func TestLoadConfigInvalid(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "config-*.toml")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
+	tempFile := filepath.Join(t.TempDir(), "config.toml")
+	writeTestFile(t, tempFile, []byte("{{invalid toml!!"))
 
-	if _, err := tempFile.Write([]byte("{{invalid toml!!")); err != nil {
-		t.Fatalf("Failed to write: %v", err)
-	}
-	tempFile.Close()
-
-	_, err = loadConfig(tempFile.Name())
+	_, err := loadConfig(tempFile)
 	if err == nil {
 		t.Error("Expected error for invalid TOML, got nil")
 	}
@@ -1385,15 +1292,11 @@ func TestLoadConfigEmptyPath(t *testing.T) {
 }
 
 func TestDefaultConfigPath(t *testing.T) {
+	home := setHermeticHome(t)
 	path := defaultConfigPath()
-	if path == "" {
-		t.Error("defaultConfigPath returned empty string")
-	}
-	if !strings.Contains(path, "checksumtool") {
-		t.Errorf("Expected path to contain 'checksumtool', got %s", path)
-	}
-	if !strings.HasSuffix(path, "config.toml") {
-		t.Errorf("Expected path to end with config.toml, got %s", path)
+	expected := filepath.Join(home, ".config", "checksumtool", "config.toml")
+	if path != expected {
+		t.Errorf("Expected defaultConfigPath to use hermetic home.\nexpected: %s\ngot: %s", expected, path)
 	}
 }
 
@@ -1452,25 +1355,25 @@ func TestResolveDirectories(t *testing.T) {
 }
 
 func TestWalkDirectoriesForMissingSymlinkDir(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "testdir")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
+	tempDir := t.TempDir()
 
 	// Create a real file
 	realFile := filepath.Join(tempDir, "real.txt")
-	os.WriteFile(realFile, []byte("data"), 0644)
+	writeTestFile(t, realFile, []byte("data"))
 
 	// Create a subdirectory with a file
 	subDir := filepath.Join(tempDir, "subdir")
-	os.Mkdir(subDir, 0755)
+	if err := os.Mkdir(subDir, 0o755); err != nil {
+		t.Fatalf("Failed to create subdirectory: %v", err)
+	}
 	subFile := filepath.Join(subDir, "sub.txt")
-	os.WriteFile(subFile, []byte("sub"), 0644)
+	writeTestFile(t, subFile, []byte("sub"))
 
 	// Create a symlink loop: tempDir/loop -> tempDir
 	loopLink := filepath.Join(tempDir, "loop")
-	os.Symlink(tempDir, loopLink)
+	if err := os.Symlink(tempDir, loopLink); err != nil {
+		t.Fatalf("Failed to create symlink loop: %v", err)
+	}
 
 	checksumDB := &ChecksumDB{Checksums: make(map[string]uint64)}
 

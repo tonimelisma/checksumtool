@@ -98,3 +98,5 @@ checksumtool is developed by Toni Melisma and released in 2024. The code was alm
 ## Contributor Workflow
 
 Repository changes are expected to complete the full Definition of Done automatically: implement the change, run `go test -v`, `go test -race -v`, and `go vet ./...`, update docs, commit, push, and create a patch release tag for user-facing bug fixes unless the handoff explicitly explains why no release was done.
+
+The test suite is expected to stay hermetic: tests should use temp-only fixtures, isolate `HOME`/config/database paths when spawning the CLI, and never read from or write to a contributor's real checksumtool data.
