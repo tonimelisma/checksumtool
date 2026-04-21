@@ -466,6 +466,19 @@ type Config struct {
 	Verbose     bool     `toml:"verbose"`
 }
 
+func resolveDirectories(mode string, cliDirectories, configDirectories []string) []string {
+	if len(cliDirectories) > 0 {
+		return cliDirectories
+	}
+
+	switch mode {
+	case "list-missing", "add-missing":
+		return configDirectories
+	default:
+		return nil
+	}
+}
+
 func defaultConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -541,12 +554,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	directories := flag.Args()
-
-	// If no CLI directories, use config directories
-	if len(directories) == 0 {
-		directories = cfg.Directories
-	}
+	directories := resolveDirectories(mode, flag.Args(), cfg.Directories)
 
 	if (mode == "list-missing" || mode == "add-missing") && len(directories) == 0 {
 		fmt.Printf("Error: %s mode requires at least one directory argument\n", mode)

@@ -84,7 +84,7 @@ workers = 8
 verbose = true
 ```
 
-**Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If the config file doesn't exist, defaults are used silently.
+**Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing` and `add-missing`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
 
 ## Breaking Changes (v2)
 

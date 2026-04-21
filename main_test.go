@@ -1164,6 +1164,48 @@ func TestMainBinary(t *testing.T) {
 	if !strings.Contains(string(out), "File deleted:") {
 		t.Errorf("Expected deleted file output for legacy DB entry, got: %s", out)
 	}
+
+	// Regression test: list-deleted without CLI directories should scan the
+	// entire DB even when config directories are present.
+	filteredDir := t.TempDir()
+	unfilteredDir := t.TempDir()
+	filteredFile := filepath.Join(filteredDir, "filtered.txt")
+	unfilteredFile := filepath.Join(unfilteredDir, "unfiltered.txt")
+
+	os.WriteFile(filteredFile, []byte("filtered"), 0644)
+	os.WriteFile(unfilteredFile, []byte("unfiltered"), 0644)
+
+	configFilteredDB := filepath.Join(t.TempDir(), "filtered.json")
+	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", configFilteredDB, filteredDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to add filtered dir: %v\n%s", err, out)
+	}
+	cmd = exec.Command(binPath, "-mode", "add-missing", "-db", configFilteredDB, unfilteredDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to add unfiltered dir: %v\n%s", err, out)
+	}
+
+	if err := os.Remove(filteredFile); err != nil {
+		t.Fatalf("Failed to remove filtered file: %v", err)
+	}
+	if err := os.Remove(unfilteredFile); err != nil {
+		t.Fatalf("Failed to remove unfiltered file: %v", err)
+	}
+
+	configWithDirs := filepath.Join(t.TempDir(), "dirs.toml")
+	configBody := fmt.Sprintf("directories = [%q]\n", filteredDir)
+	if err := os.WriteFile(configWithDirs, []byte(configBody), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	cmd = exec.Command(binPath, "-mode", "list-deleted", "-db", configFilteredDB, "-config", configWithDirs)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected success for list-deleted with config directories, got: %v\n%s", err, out)
+	}
+	if strings.Count(string(out), "File deleted:") != 2 {
+		t.Errorf("Expected both deleted files to be listed despite config directories, got: %s", out)
+	}
 }
 
 func TestProcessResultsUpdateDeletedFile(t *testing.T) {
@@ -1352,6 +1394,60 @@ func TestDefaultConfigPath(t *testing.T) {
 	}
 	if !strings.HasSuffix(path, "config.toml") {
 		t.Errorf("Expected path to end with config.toml, got %s", path)
+	}
+}
+
+func TestResolveDirectories(t *testing.T) {
+	configDirs := []string{"/config/dir"}
+	cliDirs := []string{"/cli/dir"}
+
+	tests := []struct {
+		name     string
+		mode     string
+		cli      []string
+		config   []string
+		expected []string
+	}{
+		{
+			name:     "cli directories always win",
+			mode:     "list-deleted",
+			cli:      cliDirs,
+			config:   configDirs,
+			expected: cliDirs,
+		},
+		{
+			name:     "list missing uses config directories",
+			mode:     "list-missing",
+			config:   configDirs,
+			expected: configDirs,
+		},
+		{
+			name:     "add missing uses config directories",
+			mode:     "add-missing",
+			config:   configDirs,
+			expected: configDirs,
+		},
+		{
+			name:     "list deleted ignores config directories",
+			mode:     "list-deleted",
+			config:   configDirs,
+			expected: nil,
+		},
+		{
+			name:     "check ignores config directories",
+			mode:     "check",
+			config:   configDirs,
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveDirectories(tt.mode, tt.cli, tt.config)
+			if !reflect.DeepEqual(got, tt.expected) {
+				t.Fatalf("resolveDirectories(%q, %v, %v) = %v, expected %v", tt.mode, tt.cli, tt.config, got, tt.expected)
+			}
+		})
 	}
 }
 
