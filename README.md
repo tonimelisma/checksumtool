@@ -39,6 +39,7 @@ checksumtool [flags] [directories...]
 
 - Symlinks are followed by default (Go's `filepath.Walk` behavior). Symlink loops may cause issues.
 - The database file is created with mode 0600 (owner read/write only).
+- Database entries are normalized to absolute paths when loaded, so older databases with relative paths still work with directory-filtered modes such as `list-deleted` and `remove-deleted`.
 
 ### Examples
 

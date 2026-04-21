@@ -80,11 +80,40 @@ func loadChecksumDB(dbFilePath string, verbose bool) (*ChecksumDB, error) {
 		return nil, fmt.Errorf("failed to parse database file: %w", err)
 	}
 
+	normalizedChecksums, err := normalizeChecksumPaths(checksumDB.Checksums)
+	if err != nil {
+		return nil, err
+	}
+	checksumDB.Checksums = normalizedChecksums
+
 	if verbose {
 		fmt.Printf("Checksum database loaded with %d files\n", len(checksumDB.Checksums))
 	}
 
 	return checksumDB, nil
+}
+
+func normalizeChecksumPaths(checksums map[string]uint64) (map[string]uint64, error) {
+	normalized := make(map[string]uint64, len(checksums))
+
+	for filePath, checksum := range checksums {
+		if filePath == "" {
+			return nil, fmt.Errorf("database contains an empty file path")
+		}
+
+		absPath, err := filepath.Abs(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to normalize database path %q: %w", filePath, err)
+		}
+
+		if existingChecksum, ok := normalized[absPath]; ok && existingChecksum != checksum {
+			return nil, fmt.Errorf("database contains conflicting checksums for normalized path %q", absPath)
+		}
+
+		normalized[absPath] = checksum
+	}
+
+	return normalized, nil
 }
 
 func saveChecksumDB(dbFilePath string, checksumDB *ChecksumDB, verbose bool) error {

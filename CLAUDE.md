@@ -18,7 +18,7 @@ No Makefile, linter config, or CI pipeline exists — standard Go toolchain only
 Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by computing xxhash64 checksums and storing them in a JSON database. External dependencies: `github.com/cespare/xxhash/v2`, `github.com/BurntSushi/toml`.
 
 **Core data structures**:
-- `ChecksumDB` — a map of absolute file paths to uint64 checksums, protected by a `sync.Mutex`.
+- `ChecksumDB` — a map of absolute file paths to uint64 checksums, protected by a `sync.Mutex`. `loadChecksumDB()` normalizes any legacy relative keys to absolute paths on load.
 - `WorkerResult` — struct carrying file path, checksum, existence flag, and error from workers.
 
 **Concurrency model**: Worker pool pattern using goroutines and channels. `worker()` goroutines read from a jobs channel, compute checksums, and send `WorkerResult`s to a results channel. `processResults()` consumes results and applies mode-specific logic. An `outputMu` mutex serializes stdout writes. Worker count is configurable (default: 4).

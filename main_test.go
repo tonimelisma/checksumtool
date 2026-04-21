@@ -136,13 +136,17 @@ func TestWorkerError(t *testing.T) {
 }
 
 func TestLoadChecksumDB(t *testing.T) {
+	tempDir := t.TempDir()
+	file1Path := filepath.Join(tempDir, "file1")
+	file2Path := filepath.Join(tempDir, "file2")
+
 	tempFile, err := os.CreateTemp("", "testdb")
 	if err != nil {
 		t.Fatalf("Failed to create temporary file: %v", err)
 	}
 	defer os.Remove(tempFile.Name())
 
-	content := []byte(`{"checksums":{"file1":1234,"file2":5678}}`)
+	content := []byte(fmt.Sprintf(`{"checksums":{"%s":1234,"%s":5678}}`, file1Path, file2Path))
 	if _, err := tempFile.Write(content); err != nil {
 		t.Fatalf("Failed to write content to temporary file: %v", err)
 	}
@@ -154,8 +158,8 @@ func TestLoadChecksumDB(t *testing.T) {
 	}
 
 	expectedChecksums := map[string]uint64{
-		"file1": 1234,
-		"file2": 5678,
+		file1Path: 1234,
+		file2Path: 5678,
 	}
 
 	if !reflect.DeepEqual(checksumDB.Checksums, expectedChecksums) {
@@ -189,6 +193,48 @@ func TestLoadChecksumDBCorrupt(t *testing.T) {
 	_, err = loadChecksumDB(tempFile.Name(), false)
 	if err == nil {
 		t.Error("Expected an error for corrupt database file, got nil")
+	}
+}
+
+func TestLoadChecksumDBNormalizesRelativePaths(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "file.txt")
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+
+	relPath, err := filepath.Rel(wd, filePath)
+	if err != nil {
+		t.Fatalf("Failed to create relative path: %v", err)
+	}
+
+	tempFile, err := os.CreateTemp("", "testdb")
+	if err != nil {
+		t.Fatalf("Failed to create temporary file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	content := []byte(fmt.Sprintf(`{"checksums":{"%s":1234}}`, relPath))
+	if _, err := tempFile.Write(content); err != nil {
+		t.Fatalf("Failed to write content to temporary file: %v", err)
+	}
+	tempFile.Close()
+
+	checksumDB, err := loadChecksumDB(tempFile.Name(), false)
+	if err != nil {
+		t.Fatalf("Failed to load checksum database: %v", err)
+	}
+
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		t.Fatalf("Failed to resolve absolute path: %v", err)
+	}
+
+	expectedChecksums := map[string]uint64{absPath: 1234}
+	if !reflect.DeepEqual(checksumDB.Checksums, expectedChecksums) {
+		t.Errorf("Checksum database mismatch. Expected: %v, Got: %v", expectedChecksums, checksumDB.Checksums)
 	}
 }
 
@@ -1084,6 +1130,39 @@ func TestMainBinary(t *testing.T) {
 	out, err = cmd.CombinedOutput()
 	if strings.Contains(string(out), "Loading checksum database") {
 		t.Errorf("Expected CLI -verbose=false to override config, got: %s", out)
+	}
+
+	// Regression test: list-deleted should still work when the DB contains
+	// a legacy relative path and the user scopes the check to a directory.
+	legacyDir := t.TempDir()
+	legacyFile := filepath.Join(legacyDir, "legacy.txt")
+	os.WriteFile(legacyFile, []byte("legacy"), 0644)
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+
+	legacyRelativePath, err := filepath.Rel(wd, legacyFile)
+	if err != nil {
+		t.Fatalf("Failed to compute legacy relative path: %v", err)
+	}
+
+	legacyDB := filepath.Join(t.TempDir(), "legacy.json")
+	legacyJSON := fmt.Sprintf(`{"checksums":{"%s":1234}}`, legacyRelativePath)
+	os.WriteFile(legacyDB, []byte(legacyJSON), 0600)
+
+	if err := os.Remove(legacyFile); err != nil {
+		t.Fatalf("Failed to delete legacy test file: %v", err)
+	}
+
+	cmd = exec.Command(binPath, "-mode", "list-deleted", "-db", legacyDB, legacyDir)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected success for list-deleted with legacy DB entry, got: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "File deleted:") {
+		t.Errorf("Expected deleted file output for legacy DB entry, got: %s", out)
 	}
 }
 
