@@ -94,3 +94,7 @@ verbose = true
 ## Attribution
 
 checksumtool is developed by Toni Melisma and released in 2024. The code was almost entirely written by Claude based on my algorithm and instructions.
+
+## Contributor Workflow
+
+Repository changes are expected to complete the full Definition of Done automatically: implement the change, run `go test -v`, `go test -race -v`, and `go vet ./...`, update docs, commit, push, and create a patch release tag for user-facing bug fixes unless the handoff explicitly explains why no release was done.
