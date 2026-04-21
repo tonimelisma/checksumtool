@@ -47,3 +47,17 @@ Every feature or change is complete when all of the following are satisfied:
    - Backward-compatible features or meaningful UX improvements: minor release (for example `v1.2.0`)
    - Breaking changes: major release
    If a change is intentionally not being released yet, say that explicitly in the handoff instead of silently skipping the release step.
+
+## Execution Expectations
+
+- Do not stop at implementation. Unless the user explicitly says otherwise, continue automatically through tests, docs, commit, push, and release work required by the Definition of Done.
+- Do not ask for permission for ordinary repository tasks that are already part of the Definition of Done. Execute them.
+- For user-facing bug fixes and behavior corrections, create and push the patch release tag automatically. Do not leave a fix unreleased just because the user did not separately ask for a release.
+- Before handing off, perform a full Definition of Done audit in order. If any item is incomplete, stop, complete it, and then restart the audit from item 1. Repeat until every Definition of Done item is satisfied.
+- End every completed task with a compact Definition of Done report covering:
+  - code changes made
+  - verification commands and results
+  - docs updated
+  - commit SHA
+  - push status
+  - release tag status, or an explicit reason no release was done
