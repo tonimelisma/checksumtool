@@ -214,7 +214,12 @@ func isUnderDir(filePath, dirPath string) bool {
 func walkDirectoriesForMissing(directories []string, checksumDB *ChecksumDB) ([]string, error) {
 	var files []string
 	for _, directory := range directories {
-		err := filepath.WalkDir(directory, func(path string, d os.DirEntry, err error) error {
+		walkRoot, err := resolveWalkRoot(directory)
+		if err != nil {
+			return nil, err
+		}
+
+		err = filepath.WalkDir(walkRoot, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -225,9 +230,14 @@ func walkDirectoriesForMissing(directories []string, checksumDB *ChecksumDB) ([]
 
 			// WalkDir doesn't follow symlinks into directories, so symlink
 			// loops are not a risk. Process regular files and symlinked files
-			// (workers follow symlinks when opening). Skip other types
-			// (devices, pipes, sockets, etc.).
-			if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
+			// (workers follow symlinked files when opening), but skip symlinked
+			// directories so workers do not try to hash a directory.
+			if d.Type()&os.ModeSymlink != 0 {
+				targetInfo, statErr := os.Stat(path)
+				if statErr == nil && targetInfo.IsDir() {
+					return nil
+				}
+			} else if !d.Type().IsRegular() {
 				return nil
 			}
 
@@ -247,6 +257,22 @@ func walkDirectoriesForMissing(directories []string, checksumDB *ChecksumDB) ([]
 		}
 	}
 	return files, nil
+}
+
+func resolveWalkRoot(directory string) (string, error) {
+	info, err := os.Stat(directory)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return directory, nil
+	}
+
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 func getFilesToProcess(mode string, directories []string, checksumDB *ChecksumDB) ([]string, bool, error) {

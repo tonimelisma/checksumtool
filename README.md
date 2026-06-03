@@ -37,7 +37,8 @@ checksumtool [flags] [directories...]
 
 ### Notes
 
-- Symlinks are followed by default (Go's `filepath.Walk` behavior). Symlink loops may cause issues.
+- Directory arguments are resolved through symlinks before scanning, so passing a symlinked directory walks the target directory.
+- Symlinked files are checksummed through their targets. Symlinked directories found inside a scan are skipped to avoid loops and directory read errors.
 - The database file is created with mode 0600 (owner read/write only).
 - Database entries are normalized to absolute paths when loaded, so older databases with relative paths still work with directory-filtered modes such as `list-deleted` and `remove-deleted`.
 

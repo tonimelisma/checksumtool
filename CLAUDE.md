@@ -29,6 +29,8 @@ Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by
 
 **Config file**: Optional TOML config at `~/.config/checksumtool/config.toml` (override with `-config` flag). Supports `directories`, `workers`, and `verbose` fields. CLI flags always override config values; `flag.Visit()` detects explicitly-set flags. Config `directories` seed `list-missing` and `add-missing` when no CLI directories are given, while DB-based modes only filter when directories are explicitly passed on the command line. Missing config file is silently ignored.
 
+**Filesystem walking**: `list-missing` and `add-missing` resolve directory arguments through symlinks before walking, skip symlinked directories found inside the walk to avoid loops and directory hashing errors, and still process symlinked files by hashing their targets.
+
 **Key flow**: `main()` → parse flags → `loadConfig()` → `loadChecksumDB()` → `getFilesToProcess()` → spawn workers → `processResults()` → `saveChecksumDB()`. Context-based interrupt handling via `context.WithCancel` stops job feeding on SIGINT/SIGTERM and saves the DB for mutating modes.
 
 **Default DB path**: `~/.local/share/checksumtool/checksums.json` (created with mode 0600).

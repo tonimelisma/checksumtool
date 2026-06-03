@@ -607,6 +607,32 @@ func TestWalkDirectoriesForMissing(t *testing.T) {
 	}
 }
 
+func TestWalkDirectoriesForMissingRootSymlinkDir(t *testing.T) {
+	tempDir := t.TempDir()
+	targetDir := filepath.Join(tempDir, "target")
+	filePath := filepath.Join(targetDir, "file.txt")
+	writeTestFile(t, filePath, []byte("file"))
+
+	linkPath := filepath.Join(tempDir, "link")
+	if err := os.Symlink(targetDir, linkPath); err != nil {
+		t.Fatalf("Failed to create symlinked directory: %v", err)
+	}
+
+	checksumDB := &ChecksumDB{Checksums: make(map[string]uint64)}
+	files, err := walkDirectoriesForMissing([]string{linkPath}, checksumDB)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	absFile, err := filepath.Abs(filePath)
+	if err != nil {
+		t.Fatalf("Failed to resolve absolute file path: %v", err)
+	}
+	if !reflect.DeepEqual(files, []string{absFile}) {
+		t.Fatalf("Expected only target file %s, got %v", absFile, files)
+	}
+}
+
 func TestFormatDuration(t *testing.T) {
 	testCases := []struct {
 		duration time.Duration
@@ -1396,5 +1422,8 @@ func TestWalkDirectoriesForMissingSymlinkDir(t *testing.T) {
 	}
 	if !found[absSub] {
 		t.Errorf("Expected to find %s in results", absSub)
+	}
+	if found[loopLink] {
+		t.Errorf("Expected symlinked directory %s to be skipped", loopLink)
 	}
 }
