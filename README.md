@@ -28,7 +28,7 @@ checksumtool [flags] [directories...]
 ### Flags
 - `-db string`: Checksum database file location (default `$HOME/.local/share/checksumtool/checksums.json`)
 - `-config string`: Config file location (default `$HOME/.config/checksumtool/config.toml`)
-- `-verbose`: Enable verbose output
+- `-verbose`: Enable verbose output. Suppressed when stdout is not a terminal, so an unattended run does not mail its progress chatter
 - `-mode string`: Operation mode: sync, apply, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate
 - `-workers int`: Number of worker goroutines (default 4)
 - `-scan-report string`: Scan report location (default: alongside the database, as `<db>.scan.json`)
@@ -93,13 +93,20 @@ splits its findings in two:
   reported as deletions plus additions instead of moves. The deletion half is
   concerning; the addition half is not.
 
-The run ends with a one-line verdict: either `Nothing worrying: ...` or
+When there is something to report, the run ends with a one-line verdict:
 `Needs attention: N changed, N corrupt, N unverifiable, N deleted.` This makes
 `sync` usable unattended — a non-zero exit means something needs your eyes, not
 that you added photos.
 
+**When there is nothing to report and stdout is not a terminal, `sync` prints
+nothing at all** — no summary, no verdict, not even a blank line. Cron mails
+whatever a job writes, and mail that arrives every month regardless of the
+result is mail that stops being read, so the arrival of mail is itself the
+signal. Run it on a terminal and the summary and verdict come back.
+
 `-list-all` is deliberately separate from `-verbose`: wanting a progress bar is
-not the same as wanting every new file enumerated.
+not the same as wanting every new file enumerated. `-list-all` also restores the
+summary on an otherwise silent run.
 
 ### Scan, review, apply
 
@@ -194,6 +201,11 @@ strict_moves = false
 ```
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
+
+## Changes in v3.2
+
+- **Silence when there is nothing to say**: a `sync` run that found nothing needing a decision writes no output at all when stdout is not a terminal. Previously it printed a summary and a reassuring verdict, which meant a monthly cron job mailed a report every month whether or not anything had happened.
+- **`-verbose` requires a terminal**: informational chatter (`Loading checksum database...`, `Saving...`, `Comparing...`, `Finished operation...`) is suppressed off a terminal, including when `verbose = true` comes from the config file. Findings, warnings and errors are never suppressed. This lets one config serve both interactive and unattended use.
 
 ## Changes in v3.1
 

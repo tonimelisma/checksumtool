@@ -1006,12 +1006,15 @@ func TestMainBinary(t *testing.T) {
 		t.Errorf("Expected mismatch message, got: %s", out)
 	}
 
-	// Test: verbose mode
+	// Test: verbose mode is suppressed when stdout is not a terminal, so an
+	// unattended run does not mail its progress chatter. Findings still print.
 	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", freshDB, "-verbose", testDir)
 	out, err = cmd.CombinedOutput()
-	// Will exit 1 due to mismatch, but should have verbose output
-	if !strings.Contains(string(out), "Loading checksum database") {
-		t.Errorf("Expected verbose output, got: %s", out)
+	if strings.Contains(string(out), "Loading checksum database") {
+		t.Errorf("Expected verbose chatter to be suppressed off a terminal, got: %s", out)
+	}
+	if !strings.Contains(string(out), "Mismatch") {
+		t.Errorf("Expected findings to print regardless of verbosity, got: %s", out)
 	}
 
 	// Test: update mode with a database entry that points at a directory
@@ -1080,9 +1083,10 @@ func TestMainBinary(t *testing.T) {
 	writeTestFile(t, cfgWithOpts, []byte("workers = 2\nverbose = true\n"))
 	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", cfgDB, "-config", cfgWithOpts)
 	out, err = cmd.CombinedOutput()
-	// Should have verbose output from config
-	if !strings.Contains(string(out), "Loading checksum database") {
-		t.Errorf("Expected verbose output from config, got: %s", out)
+	// verbose = true in the config must not resurrect the chatter off a
+	// terminal either: this host's config sets it, and cron still must be quiet.
+	if strings.Contains(string(out), "Loading checksum database") {
+		t.Errorf("Expected config verbose to stay suppressed off a terminal, got: %s", out)
 	}
 
 	// Test: CLI flags override config
@@ -2449,10 +2453,16 @@ func TestSyncListsOnlyConcerningFindingsByDefault(t *testing.T) {
 	}
 	writeTestFile(t, filepath.Join(dataDir, "fresh.jpg"), []byte("a brand new file"))
 
+	// A deleted file makes this scan worth reporting; without one the run is
+	// silent, which TestSyncIsSilentWhenNothingNeedsADecision covers.
+	if err := os.Remove(stays); err != nil {
+		t.Fatalf("Failed to remove the test file: %v", err)
+	}
+
 	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, dataDir)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Expected a zero exit when only moves and additions were found, got: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("Expected a non-zero exit when a file was deleted, got:\n%s", out)
 	}
 	report := string(out)
 
@@ -2462,12 +2472,46 @@ func TestSyncListsOnlyConcerningFindingsByDefault(t *testing.T) {
 	if strings.Contains(report, "Moved: ") {
 		t.Errorf("Expected moves not to be listed by default, got:\n%s", report)
 	}
-	if !strings.Contains(report, "Nothing worrying") {
-		t.Errorf("Expected a reassuring verdict, got:\n%s", report)
+	if !strings.Contains(report, "Deleted: ") {
+		t.Errorf("Expected the deletion to be listed, got:\n%s", report)
 	}
 	// The counts still have to be there, so nothing is hidden outright.
 	if !strings.Contains(report, "moved:        1") || !strings.Contains(report, "new:          1") {
 		t.Errorf("Expected moves and additions to survive as counts, got:\n%s", report)
+	}
+}
+
+// Cron mails whatever a job writes, so a scan that found nothing needing a
+// decision must write nothing at all -- not a summary, not a verdict, not even
+// a blank line. The exit code is what carries the result to the caller.
+func TestSyncIsSilentWhenNothingNeedsADecision(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	stays := filepath.Join(dataDir, "stays.jpg")
+	writeTestFile(t, stays, []byte("this file does not move"))
+	moves := filepath.Join(dataDir, "moves.jpg")
+	writeTestFile(t, moves, []byte("this file gets renamed"))
+
+	cmd := hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to seed the database: %v\n%s", err, out)
+	}
+
+	// Moves and additions are ordinary churn, so neither breaks the silence.
+	if err := os.Rename(moves, filepath.Join(dataDir, "renamed.jpg")); err != nil {
+		t.Fatalf("Failed to rename the test file: %v", err)
+	}
+	writeTestFile(t, filepath.Join(dataDir, "fresh.jpg"), []byte("a brand new file"))
+
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, "-verbose", dataDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Expected a zero exit when only moves and additions were found, got: %v\n%s", err, out)
+	}
+	if len(out) != 0 {
+		t.Errorf("Expected no output at all, got %d bytes:\n%q", len(out), out)
 	}
 }
 

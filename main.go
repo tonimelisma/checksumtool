@@ -1335,6 +1335,17 @@ func main() {
 	if !explicitFlags["verbose"] {
 		verbose = cfg.Verbose
 	}
+
+	// Informational output exists for a human watching a run. Under cron it
+	// only produces mail, and mail that arrives every month regardless of the
+	// result is mail that stops being read. So when stdout is not a terminal,
+	// only findings are worth printing. This overrides -verbose deliberately:
+	// the same config file serves both the interactive and the unattended use,
+	// and the unattended one is the one that must stay quiet.
+	interactive := isTerminal()
+	if !interactive {
+		verbose = false
+	}
 	if !explicitFlags["strict-moves"] {
 		strictMoves = cfg.StrictMoves
 	}
@@ -1478,10 +1489,13 @@ func main() {
 
 	if mode == "sync" {
 		report := buildScanReport(state, checksumDB, dbFilePath, walkRoots, strictMoves, ctx.Err() != nil)
-		printScanSummary(report, listAll)
 		// A changed or deleted file is worth a non-zero exit even though it is
 		// not a read error, so an unattended run reports on its own.
 		concerning := mismatchCount > 0 || report.Concerning() > 0
+		// An interrupted scan verified only part of the archive, so it is
+		// reported even when what it did read came back clean.
+		silent := !interactive && !listAll && !report.Partial && !concerning
+		printScanSummary(report, listAll, silent)
 
 		if err := saveScanReport(scanReportPath, report); err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -1489,7 +1503,7 @@ func main() {
 		}
 
 		if !applyNow {
-			if !report.Empty() {
+			if !report.Empty() && !silent {
 				fmt.Printf("\nScan report written to %s\nReview it, then run: checksumtool -mode apply\n", scanReportPath)
 			}
 			if concerning {
@@ -1499,7 +1513,9 @@ func main() {
 		}
 
 		stats := applyScanReport(checksumDB, report, applyOpts{withDeleted: withDeleted, withCorrupt: withCorrupt})
-		printApplyStats(stats)
+		if !silent {
+			printApplyStats(stats)
+		}
 		if err := saveChecksumDB(dbFilePath, checksumDB, verbose); err != nil {
 			fmt.Printf("Error saving database: %v\n", err)
 			os.Exit(1)
@@ -1558,7 +1574,13 @@ func buildScanReport(state *syncState, checksumDB *ChecksumDB, dbFilePath string
 	}
 }
 
-func printScanSummary(report *ScanReport, listAll bool) {
+func printScanSummary(report *ScanReport, listAll, silent bool) {
+	// A scan with nothing to decide on, with nobody watching, says nothing at
+	// all -- not even a blank line -- so that the arrival of mail is itself the
+	// signal. The exit code still carries the result for the caller.
+	if silent {
+		return
+	}
 	// Listing every move and addition buries the findings that need a decision
 	// under the ordinary churn of a growing archive, so they are summarized as
 	// counts unless the caller asks for the full listing. This is deliberately
