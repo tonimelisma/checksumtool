@@ -18,7 +18,7 @@ My personal use case is to detect bit rot in any pictures. Throughout the years 
 - Optional TOML config file for default directories, workers, and verbose settings
 - Progress tracking and estimation of remaining time
 - Interrupt handling to save work done so far
-- Non-zero exit code on checksum mismatches in check and sync modes
+- Non-zero exit code on checksum mismatches in check and sync modes, and on changed or deleted files in sync
 
 ## Usage
 checksumtool [flags] [directories...]
@@ -35,11 +35,12 @@ checksumtool [flags] [directories...]
 - `-apply`: With `sync`, write the scan results to the database in the same run
 - `-with-deleted`: When applying, also remove entries whose file is gone
 - `-with-corrupt`: When updating or applying, also accept content changes that could not be told apart from corruption
+- `-list-all`: With `sync`, also list moved and new files, not just the findings that need attention
 - `-strict-moves`: Only treat a checksum group as a move when exactly one file vanished and one appeared
 - `-force`: With `apply`, use the scan report even if it is partial or the database changed since the scan
 
 ### Operation Modes
-- `sync`: One pass over everything. Verifies database entries, walks the directories for files not yet recorded, and classifies each file as verified, modified, corrupt, moved, new or deleted. Reports only and writes a scan report; add `-apply` to write the results in the same run. Requires at least one directory (from arguments or the config file). Exits with code 1 if corruption is suspected or a file could not be read.
+- `sync`: One pass over everything. Verifies database entries, walks the directories for files not yet recorded, and classifies each file as verified, modified, corrupt, moved, new or deleted. Lists only the findings that need a decision — changed, corrupt, unverifiable and deleted files — while moves and additions are summarized as counts unless `-list-all` is given. Reports only and writes a scan report; add `-apply` to write the results in the same run. Requires at least one directory (from arguments or the config file). Exits with code 1 if any concerning finding is present or a file could not be read.
 - `apply`: Apply a scan report written by a previous `sync` run, without re-reading any file contents. Applies moved, new, modified and metadata-only changes; deletions and corruption suspects need `-with-deleted` / `-with-corrupt`.
 - `check`: Compare checksums of files against the stored database and report any mismatches. Exits with code 1 if any mismatches are found. Directories are optional; if omitted, all DB entries are checked.
 - `update`: Update the checksum database with new or changed files. Refuses to overwrite an entry whose mismatch looks like corruption unless `-with-corrupt` is passed. Directories are optional.
@@ -66,6 +67,39 @@ A move is not a distinct filesystem event: it is a deletion plus an addition tha
 A checksum group is only treated as a move when both sides have equal counts. Duplicate content is normal in a media archive, and when the counts are equal every possible pairing produces the same database — only the printed pairing is arbitrary. Unequal counts are undecidable, so those files are reported as ordinary deletions and additions instead. `-strict-moves` narrows matching to exactly one vanished file and one new file.
 
 A move can never mask corruption, because matching requires the content hash to be intact. A file that was both moved and corrupted simply fails to match and is reported as a deletion plus a new file.
+
+### What sync reports
+
+A growing archive produces moves and additions constantly, and listing every one
+of them buries the handful of findings that actually need a decision. So `sync`
+splits its findings in two:
+
+**Concerning — listed individually, and each one makes the run exit 1:**
+
+- `modified` — content and metadata both changed. An ordinary edit, but in an
+  archive of finished files an edit is still something you want to know about.
+- `corrupt` — content changed while size and timestamp did not.
+- `unverifiable` — content changed with no recorded metadata to judge it by.
+- `deleted` — recorded in the database, no longer on disk.
+- read errors — a file that could not be opened or hashed.
+
+**Ordinary — counted in the summary, listed only with `-list-all`, never a failure:**
+
+- `verified` — content matches the database.
+- `metadata` — content matches, but size or timestamp drifted and gets refreshed.
+- `moved` — a vanished entry and a new file that share content.
+- `new` — a file on disk that is not in the database yet.
+- `ambiguous` — a checksum group whose two sides had unequal counts, so it is
+  reported as deletions plus additions instead of moves. The deletion half is
+  concerning; the addition half is not.
+
+The run ends with a one-line verdict: either `Nothing worrying: ...` or
+`Needs attention: N changed, N corrupt, N unverifiable, N deleted.` This makes
+`sync` usable unattended — a non-zero exit means something needs your eyes, not
+that you added photos.
+
+`-list-all` is deliberately separate from `-verbose`: wanting a progress bar is
+not the same as wanting every new file enumerated.
 
 ### Scan, review, apply
 
@@ -160,6 +194,11 @@ strict_moves = false
 ```
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
+
+## Changes in v3.1
+
+- **`sync` output**: only concerning findings are listed individually. Moves and additions still appear as counts in the summary and in full in the scan report; `-list-all` restores the per-file listing.
+- **`sync` exit code**: a changed (`modified`) or `deleted` file now exits 1, alongside the corruption suspects and read errors that already did. Moves and additions never do. If you relied on `sync` exiting 0 through ordinary edits, pass over the summary counts instead of the exit status.
 
 ## Breaking Changes (v3)
 

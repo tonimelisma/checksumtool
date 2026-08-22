@@ -946,6 +946,13 @@ func (r *ScanReport) Empty() bool {
 		len(r.Unverifiable) == 0 && len(r.Moved) == 0 && len(r.New) == 0 && len(r.Deleted) == 0
 }
 
+// Concerning reports how many findings warrant a human decision. Moves and
+// additions are the ordinary result of using a filesystem; content that changed
+// underneath a recorded checksum, or a file that is simply gone, is not.
+func (r *ScanReport) Concerning() int {
+	return len(r.Modified) + len(r.Corrupt) + len(r.Unverifiable) + len(r.Deleted)
+}
+
 func defaultScanReportPath(dbFilePath string) string {
 	dir := filepath.Dir(dbFilePath)
 	base := filepath.Base(dbFilePath)
@@ -1232,6 +1239,10 @@ Modes:
   sync            One pass over everything: verifies database entries, walks the
                   directories for files not yet recorded, and classifies each
                   file as verified, modified, corrupt, moved, new or deleted.
+                  Lists only the findings that need a decision -- changed,
+                  corrupt, unverifiable and deleted files; moves and additions
+                  are summarized as counts unless -list-all is given. Exits 1 if
+                  any of those findings are present, or on a read error.
                   Reports only, and writes a scan report; add -apply to write the
                   results to the database in the same run. Requires directories
                   (from arguments or the config file).
@@ -1267,7 +1278,8 @@ discovered files with the same checksum, and are only applied when both sides of
 a checksum group have equal counts (-strict-moves narrows this to one-to-one).
 A move can never mask corruption, because matching requires the hash to match.
 
-Exit codes: 0 on success, 1 on mismatches, errors, or missing files.
+Exit codes: 0 on success, 1 on mismatches, errors, or missing files. A sync
+run also exits 1 on a changed or deleted file; moves and additions never fail.
 
 Flags:
 `
@@ -1275,6 +1287,7 @@ Flags:
 func main() {
 	var dbFilePath string
 	var verbose bool
+	var listAll bool
 	var mode string
 	var numWorkers int
 	var configPath string
@@ -1293,6 +1306,7 @@ func main() {
 	flag.BoolVar(&applyNow, "apply", false, "sync: write the scan results to the database in the same run")
 	flag.BoolVar(&withDeleted, "with-deleted", false, "sync -apply / apply: also remove entries whose file is gone (skipped by default: an unmounted volume looks deleted)")
 	flag.BoolVar(&withCorrupt, "with-corrupt", false, "update, sync -apply / apply: also accept content changes that could not be told apart from corruption")
+	flag.BoolVar(&listAll, "list-all", false, "sync: also list moved and new files, not just the findings that need attention")
 	flag.BoolVar(&strictMoves, "strict-moves", false, "Only treat a checksum group as a move when exactly one file vanished and one appeared")
 	flag.BoolVar(&force, "force", false, "apply: use the scan report even if it is partial or the database changed since the scan")
 	flag.Usage = func() {
@@ -1464,7 +1478,10 @@ func main() {
 
 	if mode == "sync" {
 		report := buildScanReport(state, checksumDB, dbFilePath, walkRoots, strictMoves, ctx.Err() != nil)
-		printScanSummary(report)
+		printScanSummary(report, listAll)
+		// A changed or deleted file is worth a non-zero exit even though it is
+		// not a read error, so an unattended run reports on its own.
+		concerning := mismatchCount > 0 || report.Concerning() > 0
 
 		if err := saveScanReport(scanReportPath, report); err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -1475,7 +1492,7 @@ func main() {
 			if !report.Empty() {
 				fmt.Printf("\nScan report written to %s\nReview it, then run: checksumtool -mode apply\n", scanReportPath)
 			}
-			if mismatchCount > 0 {
+			if concerning {
 				os.Exit(1)
 			}
 			return
@@ -1493,7 +1510,7 @@ func main() {
 			fmt.Printf("Warning: failed to remove applied scan report %s: %v\n", scanReportPath, err)
 		}
 
-		if mismatchCount > 0 {
+		if concerning {
 			os.Exit(1)
 		}
 		return
@@ -1541,15 +1558,24 @@ func buildScanReport(state *syncState, checksumDB *ChecksumDB, dbFilePath string
 	}
 }
 
-func printScanSummary(report *ScanReport) {
-	for _, move := range report.Moved {
-		fmt.Printf("Moved: %s -> %s\n", move.From, move.To)
+func printScanSummary(report *ScanReport, listAll bool) {
+	// Listing every move and addition buries the findings that need a decision
+	// under the ordinary churn of a growing archive, so they are summarized as
+	// counts unless the caller asks for the full listing. This is deliberately
+	// not tied to -verbose: wanting a progress bar is not the same as wanting
+	// every new file enumerated.
+	if listAll {
+		for _, move := range report.Moved {
+			fmt.Printf("Moved: %s -> %s\n", move.From, move.To)
+		}
 	}
 	for _, path := range report.Deleted {
 		fmt.Printf("Deleted: %s\n", path)
 	}
-	for _, file := range report.New {
-		fmt.Printf("New: %s\n", file.Path)
+	if listAll {
+		for _, file := range report.New {
+			fmt.Printf("New: %s\n", file.Path)
+		}
 	}
 
 	if report.Partial {
@@ -1567,6 +1593,16 @@ func printScanSummary(report *ScanReport) {
 	fmt.Printf("  deleted:      %d\n", len(report.Deleted))
 	if report.Ambiguous > 0 {
 		fmt.Printf("  ambiguous:    %d (reported as new/deleted instead of moved)\n", report.Ambiguous)
+	}
+
+	if report.Concerning() == 0 {
+		fmt.Println("\nNothing worrying: no changed, corrupt, unverifiable or deleted files.")
+		return
+	}
+	fmt.Printf("\nNeeds attention: %d changed, %d corrupt, %d unverifiable, %d deleted.\n",
+		len(report.Modified), len(report.Corrupt), len(report.Unverifiable), len(report.Deleted))
+	if !listAll && (len(report.Moved) > 0 || len(report.New) > 0) {
+		fmt.Println("Moves and additions were not listed; pass -list-all to see them.")
 	}
 }
 

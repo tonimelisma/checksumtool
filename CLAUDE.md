@@ -23,11 +23,13 @@ Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by
 - `FileEntry` — the database value: `{checksum, size, mtime}`. Size and mtime exist to tell corruption apart from an edit, and are never used to skip hashing (bit rot does not touch either). Zero means "unknown" and suppresses metadata-based inference for that entry.
 - `ChecksumDB` — a map of absolute file paths to `FileEntry`, protected by a `sync.Mutex`. `loadChecksumDB()` normalizes any legacy relative keys to absolute paths on load, and refuses the pre-v3 bare-number format with a pointer to `-mode migrate`.
 - `WorkerResult` — struct carrying file path, checksum, size, mtime, existence flag, and error from workers.
-- `ScanReport` / `ScanFile` / `ScanMove` — what a `sync` run leaves behind so `apply` can write the database without re-reading files. Lists only changes, never the files that verified cleanly.
+- `ScanReport` / `ScanFile` / `ScanMove` — what a `sync` run leaves behind so `apply` can write the database without re-reading files. Lists only changes, never the files that verified cleanly. `Concerning()` counts the findings that warrant a human decision (modified, corrupt, unverifiable, deleted); moves and additions are deliberately excluded, since they are the ordinary result of using a filesystem.
 
 **Concurrency model**: Worker pool pattern using goroutines and channels. `worker()` goroutines read from a jobs channel, stat then hash each file, and send `WorkerResult`s to a results channel. `processResults()` consumes results and applies mode-specific logic. An `outputMu` mutex serializes stdout writes. Worker count is configurable (default: 4).
 
 **Two-phase sync**: every mode except `sync` acts on each result as it arrives. `sync` cannot: a move is the join of a vanished database entry and a discovered file that share a checksum, and neither half means anything until the walk finishes. So `processResults` accumulates into `syncState`, and `resolveMoves()` performs the join afterwards. A checksum group becomes moves only when both sides have equal counts (any pairing then yields the same database) and recorded sizes agree; otherwise it falls back to deletions plus additions. `-strict-moves` narrows this to one-to-one.
+
+**Reporting altitude**: `printScanSummary()` lists concerning findings individually and reduces moves and additions to counts, restoring the full listing under `-list-all` (kept separate from `-verbose`, which is about progress reporting). Every category still appears in the summary block and in the scan report, so nothing is hidden outright — only demoted. The run ends with an explicit `Nothing worrying` / `Needs attention` verdict.
 
 **Mismatch classification**: `classifyMismatch()` returns corrupt (metadata unchanged), unverifiable (no recorded metadata) or modified (metadata changed). Corrupt and unverifiable are never written to the database without `-with-corrupt` — overwriting them destroys the only evidence of rot. This is why `update` no longer blindly overwrites changed files.
 
@@ -45,7 +47,7 @@ Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by
 
 **Default DB path**: `~/.local/share/checksumtool/checksums.json` (created with mode 0600). Scan reports default to `<db-dir>/<db-basename>.scan.json`, also 0600. Both are written through `writeFileAtomic()` (temp file + rename).
 
-**Exit codes**: 0 on success, 1 on checksum mismatches in check mode, suspected corruption in sync mode, or on errors. Moves, additions and deletions are not errors.
+**Exit codes**: 0 on success, 1 on checksum mismatches in check mode, on errors, and in sync mode on any concerning finding — modified, corrupt, unverifiable or deleted. Moves and additions are never errors, so an unattended sync fails only when something needs a human.
 
 ## Definition of Done
 

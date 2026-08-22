@@ -2157,7 +2157,9 @@ func TestSyncDetectsAndAppliesMove(t *testing.T) {
 	}
 
 	// A move is not corruption, so sync must succeed rather than exit 1.
-	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, dataDir)
+	// -list-all because a move is not a concerning finding and is therefore
+	// summarized as a count rather than listed by default.
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-list-all", "-db", dbPath, dataDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Expected sync to succeed for a moved file, got: %v\n%s", err, out)
@@ -2421,5 +2423,164 @@ func TestResolveWalkRootFollowsSymlinkChain(t *testing.T) {
 	}
 	if resolved != targetDir {
 		t.Errorf("Expected the chain to resolve to %s, got %s", targetDir, resolved)
+	}
+}
+
+// A sync run whose only findings are a move and an addition has nothing worth a
+// human's attention, so it must neither list them nor fail.
+func TestSyncListsOnlyConcerningFindingsByDefault(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	stays := filepath.Join(dataDir, "stays.jpg")
+	writeTestFile(t, stays, []byte("this file does not move"))
+	moves := filepath.Join(dataDir, "moves.jpg")
+	writeTestFile(t, moves, []byte("this file gets renamed"))
+
+	cmd := hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to seed the database: %v\n%s", err, out)
+	}
+
+	moved := filepath.Join(dataDir, "renamed.jpg")
+	if err := os.Rename(moves, moved); err != nil {
+		t.Fatalf("Failed to rename the test file: %v", err)
+	}
+	writeTestFile(t, filepath.Join(dataDir, "fresh.jpg"), []byte("a brand new file"))
+
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, dataDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Expected a zero exit when only moves and additions were found, got: %v\n%s", err, out)
+	}
+	report := string(out)
+
+	if strings.Contains(report, "New: ") {
+		t.Errorf("Expected additions not to be listed by default, got:\n%s", report)
+	}
+	if strings.Contains(report, "Moved: ") {
+		t.Errorf("Expected moves not to be listed by default, got:\n%s", report)
+	}
+	if !strings.Contains(report, "Nothing worrying") {
+		t.Errorf("Expected a reassuring verdict, got:\n%s", report)
+	}
+	// The counts still have to be there, so nothing is hidden outright.
+	if !strings.Contains(report, "moved:        1") || !strings.Contains(report, "new:          1") {
+		t.Errorf("Expected moves and additions to survive as counts, got:\n%s", report)
+	}
+}
+
+// -list-all restores the full listing. It is deliberately independent of
+// -verbose, so a progress bar does not drag the noise back in.
+func TestSyncListAllListsMovesAndAdditions(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	moves := filepath.Join(dataDir, "moves.jpg")
+	writeTestFile(t, moves, []byte("this file gets renamed"))
+
+	cmd := hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to seed the database: %v\n%s", err, out)
+	}
+
+	moved := filepath.Join(dataDir, "renamed.jpg")
+	if err := os.Rename(moves, moved); err != nil {
+		t.Fatalf("Failed to rename the test file: %v", err)
+	}
+	newFile := filepath.Join(dataDir, "fresh.jpg")
+	writeTestFile(t, newFile, []byte("a brand new file"))
+
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-list-all", "-db", dbPath, dataDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Expected a zero exit, got: %v\n%s", err, out)
+	}
+	report := string(out)
+
+	if !strings.Contains(report, "Moved: "+moves+" -> "+moved) {
+		t.Errorf("Expected -list-all to list the move, got:\n%s", report)
+	}
+	if !strings.Contains(report, "New: "+newFile) {
+		t.Errorf("Expected -list-all to list the addition, got:\n%s", report)
+	}
+
+	// -verbose is about progress reporting, not about listing ordinary findings.
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-verbose", "-db", dbPath, dataDir)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Expected a zero exit, got: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "New: ") || strings.Contains(string(out), "Moved: ") {
+		t.Errorf("Expected -verbose alone not to list moves and additions, got:\n%s", out)
+	}
+}
+
+// An edit and a disappearance are both worth failing over, even though neither
+// is a read error and neither is suspected corruption.
+func TestSyncExitsNonZeroOnModifiedAndDeleted(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	edited := filepath.Join(dataDir, "edited.jpg")
+	writeTestFile(t, edited, []byte("original content"))
+	removed := filepath.Join(dataDir, "removed.jpg")
+	writeTestFile(t, removed, []byte("this file will be deleted"))
+
+	cmd := hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to seed the database: %v\n%s", err, out)
+	}
+
+	// A longer body changes size and timestamp too, which is an ordinary edit.
+	writeTestFile(t, edited, []byte("content that has been edited by hand"))
+	if err := os.Remove(removed); err != nil {
+		t.Fatalf("Failed to remove the test file: %v", err)
+	}
+
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, dataDir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected a non-zero exit for a modified and a deleted file, got:\n%s", out)
+	}
+	report := string(out)
+
+	if !strings.Contains(report, "Deleted: "+removed) {
+		t.Errorf("Expected the deletion to be listed, got:\n%s", report)
+	}
+	if !strings.Contains(report, edited) {
+		t.Errorf("Expected the edited file to be reported, got:\n%s", report)
+	}
+	if !strings.Contains(report, "Needs attention") {
+		t.Errorf("Expected a verdict naming the findings, got:\n%s", report)
+	}
+	if strings.Contains(report, "Nothing worrying") {
+		t.Errorf("Expected no reassuring verdict, got:\n%s", report)
+	}
+}
+
+func TestScanReportConcerning(t *testing.T) {
+	// Moves and additions are ordinary; the rest are not.
+	calm := &ScanReport{
+		Verified: 3,
+		Moved:    []ScanMove{{From: "/a", To: "/b"}},
+		New:      []ScanFile{{Path: "/c"}},
+		Touched:  []ScanFile{{Path: "/d"}},
+	}
+	if got := calm.Concerning(); got != 0 {
+		t.Errorf("Expected moves, additions and metadata refreshes to be unconcerning, got %d", got)
+	}
+
+	alarming := &ScanReport{
+		Modified:     []ScanFile{{Path: "/a"}},
+		Corrupt:      []ScanFile{{Path: "/b"}},
+		Unverifiable: []ScanFile{{Path: "/c"}},
+		Deleted:      []string{"/d"},
+	}
+	if got := alarming.Concerning(); got != 4 {
+		t.Errorf("Expected all four categories to count, got %d", got)
 	}
 }
