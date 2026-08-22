@@ -169,7 +169,7 @@ func TestLoadChecksumDB(t *testing.T) {
 	file2Path := filepath.Join(tempDir, "file2")
 
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
-	content := []byte(fmt.Sprintf(`{"checksums":{"%s":1234,"%s":5678}}`, file1Path, file2Path))
+	content := []byte(fmt.Sprintf(`{"checksums":{"%s":{"checksum":1234},"%s":{"checksum":5678}}}`, file1Path, file2Path))
 	writeTestFile(t, dbPath, content)
 
 	checksumDB, err := loadChecksumDB(dbPath, false)
@@ -177,9 +177,9 @@ func TestLoadChecksumDB(t *testing.T) {
 		t.Fatalf("Failed to load checksum database: %v", err)
 	}
 
-	expectedChecksums := map[string]uint64{
-		file1Path: 1234,
-		file2Path: 5678,
+	expectedChecksums := map[string]FileEntry{
+		file1Path: {Checksum: 1234},
+		file2Path: {Checksum: 5678},
 	}
 
 	if !reflect.DeepEqual(checksumDB.Checksums, expectedChecksums) {
@@ -222,7 +222,7 @@ func TestLoadChecksumDBNormalizesRelativePaths(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(t.TempDir(), "legacy.json")
-	content := []byte(fmt.Sprintf(`{"checksums":{"%s":1234}}`, relPath))
+	content := []byte(fmt.Sprintf(`{"checksums":{"%s":{"checksum":1234}}}`, relPath))
 	writeTestFile(t, dbPath, content)
 
 	checksumDB, err := loadChecksumDB(dbPath, false)
@@ -235,7 +235,7 @@ func TestLoadChecksumDBNormalizesRelativePaths(t *testing.T) {
 		t.Fatalf("Failed to resolve absolute path: %v", err)
 	}
 
-	expectedChecksums := map[string]uint64{absPath: 1234}
+	expectedChecksums := map[string]FileEntry{absPath: {Checksum: 1234}}
 	if !reflect.DeepEqual(checksumDB.Checksums, expectedChecksums) {
 		t.Errorf("Checksum database mismatch. Expected: %v, Got: %v", expectedChecksums, checksumDB.Checksums)
 	}
@@ -249,8 +249,8 @@ func TestGetFilesToProcess(t *testing.T) {
 	writeTestFile(t, file2, []byte("file2"))
 
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			file1: 1234,
+		Checksums: map[string]FileEntry{
+			file1: {Checksum: 1234},
 		},
 	}
 
@@ -343,9 +343,9 @@ func TestGetFilesToProcessDirectoryFilter(t *testing.T) {
 	file2Path := filepath.Join(absDir2, "file2.txt")
 
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			file1Path: 1234,
-			file2Path: 5678,
+		Checksums: map[string]FileEntry{
+			file1Path: {Checksum: 1234},
+			file2Path: {Checksum: 5678},
 		},
 	}
 
@@ -375,9 +375,9 @@ func TestSaveChecksumDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			"file1": 1234,
-			"file2": 5678,
+		Checksums: map[string]FileEntry{
+			"file1": {Checksum: 1234},
+			"file2": {Checksum: 5678},
 		},
 	}
 
@@ -391,16 +391,16 @@ func TestSaveChecksumDB(t *testing.T) {
 		t.Fatalf("Failed to read saved checksum database file: %v", err)
 	}
 
-	var savedDB map[string]map[string]uint64
+	var savedDB map[string]map[string]FileEntry
 	err = json.Unmarshal(content, &savedDB)
 	if err != nil {
 		t.Fatalf("Failed to parse saved checksum database: %v", err)
 	}
 
-	expectedDB := map[string]map[string]uint64{
+	expectedDB := map[string]map[string]FileEntry{
 		"checksums": {
-			"file1": 1234,
-			"file2": 5678,
+			"file1": {Checksum: 1234},
+			"file2": {Checksum: 5678},
 		},
 	}
 
@@ -412,7 +412,7 @@ func TestSaveChecksumDB(t *testing.T) {
 func TestSaveChecksumDBPermissions(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sub", "checksums.json")
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{"file1": 1234},
+		Checksums: map[string]FileEntry{"file1": {Checksum: 1234}},
 	}
 
 	err := saveChecksumDB(dbPath, checksumDB, false)
@@ -433,9 +433,9 @@ func TestSaveChecksumDBPermissions(t *testing.T) {
 
 func TestProcessResults(t *testing.T) {
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			"file1": 1234,
-			"file2": 5678,
+		Checksums: map[string]FileEntry{
+			"file1": {Checksum: 1234},
+			"file2": {Checksum: 5678},
 		},
 	}
 
@@ -451,7 +451,7 @@ func TestProcessResults(t *testing.T) {
 	results <- WorkerResult{FilePath: "file3", Checksum: 9012, Exists: true}
 	close(results)
 
-	mismatchCount := processResults(results, done, "check", checksumDB, &processedFiles, &outputMu, "")
+	mismatchCount := processResults(results, done, "check", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
 	if mismatchCount != 1 {
@@ -467,10 +467,10 @@ func TestProcessResults(t *testing.T) {
 	results <- WorkerResult{FilePath: "file3", Checksum: 9012, Exists: true}
 	close(results)
 
-	processResults(results, done, "update", checksumDB, &processedFiles, &outputMu, "")
+	processResults(results, done, "update", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
-	if checksumDB.Checksums["file3"] != 9012 {
+	if checksumDB.Checksums["file3"].Checksum != 9012 {
 		t.Error("New file should have been added to the checksum database")
 	}
 
@@ -483,7 +483,7 @@ func TestProcessResults(t *testing.T) {
 	results <- WorkerResult{FilePath: "file4", Checksum: 0, Exists: true}
 	close(results)
 
-	processResults(results, done, "list-missing", checksumDB, &processedFiles, &outputMu, "")
+	processResults(results, done, "list-missing", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
 	// Test case 4: "add-missing" mode
@@ -495,10 +495,10 @@ func TestProcessResults(t *testing.T) {
 	results <- WorkerResult{FilePath: "file5", Checksum: 0, Exists: false}
 	close(results)
 
-	processResults(results, done, "add-missing", checksumDB, &processedFiles, &outputMu, "")
+	processResults(results, done, "add-missing", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
-	if checksumDB.Checksums["file4"] != 3456 {
+	if checksumDB.Checksums["file4"].Checksum != 3456 {
 		t.Error("New file should have been added to the checksum database")
 	}
 
@@ -511,7 +511,7 @@ func TestProcessResults(t *testing.T) {
 	results <- WorkerResult{FilePath: "file2", Checksum: 0, Exists: false}
 	close(results)
 
-	processResults(results, done, "remove-deleted", checksumDB, &processedFiles, &outputMu, "")
+	processResults(results, done, "remove-deleted", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
 	if _, ok := checksumDB.Checksums["file1"]; ok {
@@ -524,9 +524,9 @@ func TestProcessResults(t *testing.T) {
 
 func TestProcessResultsMismatchCount(t *testing.T) {
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			"file1": 1234,
-			"file2": 5678,
+		Checksums: map[string]FileEntry{
+			"file1": {Checksum: 1234},
+			"file2": {Checksum: 5678},
 		},
 	}
 	var outputMu sync.Mutex
@@ -541,7 +541,7 @@ func TestProcessResultsMismatchCount(t *testing.T) {
 	results <- WorkerResult{FilePath: "file3", Checksum: 0, Exists: false}
 	close(results)
 
-	count := processResults(results, done, "check", checksumDB, &processedFiles, &outputMu, "")
+	count := processResults(results, done, "check", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
 	if count != 2 {
@@ -592,8 +592,8 @@ func TestWalkDirectoriesForMissing(t *testing.T) {
 	writeTestFile(t, file2, []byte("file2"))
 
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			file1: 1234,
+		Checksums: map[string]FileEntry{
+			file1: {Checksum: 1234},
 		},
 	}
 
@@ -661,7 +661,7 @@ func TestCalculateChecksumNonexistent(t *testing.T) {
 func TestLoadChecksumDBVerbose(t *testing.T) {
 	// Test verbose with existing DB
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
-	writeTestFile(t, dbPath, []byte(`{"checksums":{"file1":1234}}`))
+	writeTestFile(t, dbPath, []byte(`{"checksums":{"file1":{"checksum":1234}}}`))
 
 	db, err := loadChecksumDB(dbPath, true)
 	if err != nil {
@@ -685,7 +685,7 @@ func TestSaveChecksumDBVerbose(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{"file1": 1234},
+		Checksums: map[string]FileEntry{"file1": {Checksum: 1234}},
 	}
 
 	err := saveChecksumDB(dbPath, checksumDB, true)
@@ -699,7 +699,7 @@ func TestSaveChecksumDBWriteError(t *testing.T) {
 	writeTestFile(t, blocker, []byte("not a directory"))
 
 	err := saveChecksumDB(filepath.Join(blocker, "db.json"), &ChecksumDB{
-		Checksums: map[string]uint64{"file1": 1234},
+		Checksums: map[string]FileEntry{"file1": {Checksum: 1234}},
 	}, false)
 	if err == nil {
 		t.Error("Expected an error when the database parent path is a file")
@@ -708,9 +708,9 @@ func TestSaveChecksumDBWriteError(t *testing.T) {
 
 func TestProcessResultsListDeleted(t *testing.T) {
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			"file1": 1234,
-			"file2": 5678,
+		Checksums: map[string]FileEntry{
+			"file1": {Checksum: 1234},
+			"file2": {Checksum: 5678},
 		},
 	}
 	var outputMu sync.Mutex
@@ -723,7 +723,7 @@ func TestProcessResultsListDeleted(t *testing.T) {
 	results <- WorkerResult{FilePath: "file2", Checksum: 0, Exists: true}
 	close(results)
 
-	processResults(results, done, "list-deleted", checksumDB, &processedFiles, &outputMu, "")
+	processResults(results, done, "list-deleted", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
 	// list-deleted should not modify the DB
@@ -734,7 +734,7 @@ func TestProcessResultsListDeleted(t *testing.T) {
 
 func TestProcessResultsWithError(t *testing.T) {
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{"file1": 1234},
+		Checksums: map[string]FileEntry{"file1": {Checksum: 1234}},
 	}
 	var outputMu sync.Mutex
 
@@ -745,7 +745,7 @@ func TestProcessResultsWithError(t *testing.T) {
 	results <- WorkerResult{FilePath: "file1", Exists: true, Err: os.ErrPermission}
 	close(results)
 
-	count := processResults(results, done, "check", checksumDB, &processedFiles, &outputMu, "")
+	count := processResults(results, done, "check", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
 	if count != 1 {
@@ -773,7 +773,7 @@ func TestSaveChecksumDBTargetIsDirectory(t *testing.T) {
 	}
 
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{"file1": 1234},
+		Checksums: map[string]FileEntry{"file1": {Checksum: 1234}},
 	}
 	err := saveChecksumDB(dbPath, checksumDB, false)
 	if err == nil {
@@ -789,9 +789,9 @@ func TestGetFilesToProcessDeletedDirectoryFilter(t *testing.T) {
 	file2Path := filepath.Join(absDir2, "file2.txt")
 
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			file1Path: 1234,
-			file2Path: 5678,
+		Checksums: map[string]FileEntry{
+			file1Path: {Checksum: 1234},
+			file2Path: {Checksum: 5678},
 		},
 	}
 
@@ -830,7 +830,7 @@ func TestGetFilesToProcessDeletedDirectoryFilter(t *testing.T) {
 }
 
 func TestGetFilesToProcessRequiresDirectories(t *testing.T) {
-	checksumDB := &ChecksumDB{Checksums: make(map[string]uint64)}
+	checksumDB := &ChecksumDB{Checksums: make(map[string]FileEntry)}
 
 	_, _, err := getFilesToProcess("list-missing", nil, checksumDB)
 	if err == nil {
@@ -844,7 +844,7 @@ func TestGetFilesToProcessRequiresDirectories(t *testing.T) {
 }
 
 func TestWalkDirectoriesForMissingError(t *testing.T) {
-	checksumDB := &ChecksumDB{Checksums: make(map[string]uint64)}
+	checksumDB := &ChecksumDB{Checksums: make(map[string]FileEntry)}
 	_, err := walkDirectoriesForMissing([]string{missingPath(t, "missing", "directory")}, checksumDB)
 	if err == nil {
 		t.Error("Expected an error for nonexistent directory")
@@ -1022,7 +1022,7 @@ func TestMainBinary(t *testing.T) {
 		t.Fatalf("Failed to create directory fixture: %v", err)
 	}
 	errDB := filepath.Join(t.TempDir(), "err.json")
-	writeTestFile(t, errDB, []byte(fmt.Sprintf(`{"checksums":{"%s":1234}}`, errPath)))
+	writeTestFile(t, errDB, []byte(fmt.Sprintf(`{"checksums":{"%s":{"checksum":1234}}}`, errPath)))
 
 	cmd = hermeticCommand(t, binPath, "-mode", "update", "-db", errDB, errDir)
 	out, err = cmd.CombinedOutput()
@@ -1109,7 +1109,7 @@ func TestMainBinary(t *testing.T) {
 	}
 
 	legacyDB := filepath.Join(t.TempDir(), "legacy.json")
-	legacyJSON := fmt.Sprintf(`{"checksums":{"%s":1234}}`, legacyRelativePath)
+	legacyJSON := fmt.Sprintf(`{"checksums":{"%s":{"checksum":1234}}}`, legacyRelativePath)
 	writeTestFile(t, legacyDB, []byte(legacyJSON))
 	if err := os.Chmod(legacyDB, 0o600); err != nil {
 		t.Fatalf("Failed to chmod legacy DB: %v", err)
@@ -1171,8 +1171,8 @@ func TestMainBinary(t *testing.T) {
 
 func TestProcessResultsUpdateDeletedFile(t *testing.T) {
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			"file1": 1234,
+		Checksums: map[string]FileEntry{
+			"file1": {Checksum: 1234},
 		},
 	}
 	var outputMu sync.Mutex
@@ -1185,23 +1185,23 @@ func TestProcessResultsUpdateDeletedFile(t *testing.T) {
 	results <- WorkerResult{FilePath: "file1", Checksum: 0, Exists: false}
 	close(results)
 
-	processResults(results, done, "update", checksumDB, &processedFiles, &outputMu, "")
+	processResults(results, done, "update", checksumDB, &processedFiles, &outputMu, "", procOpts{sync: &syncState{}})
 	<-done
 
 	// The DB entry should NOT be modified (should still be 1234, not 0)
 	if checksum, ok := checksumDB.Checksums["file1"]; !ok {
 		t.Error("Expected file1 to still be in DB after update with missing file")
-	} else if checksum != 1234 {
-		t.Errorf("Expected checksum 1234 preserved, got %d", checksum)
+	} else if checksum.Checksum != 1234 {
+		t.Errorf("Expected checksum 1234 preserved, got %d", checksum.Checksum)
 	}
 }
 
 func TestSaveChecksumDBAtomicValidJSON(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 	checksumDB := &ChecksumDB{
-		Checksums: map[string]uint64{
-			"file1": 1234,
-			"file2": 5678,
+		Checksums: map[string]FileEntry{
+			"file1": {Checksum: 1234},
+			"file2": {Checksum: 5678},
 		},
 	}
 
@@ -1401,7 +1401,7 @@ func TestWalkDirectoriesForMissingSymlinkDir(t *testing.T) {
 		t.Fatalf("Failed to create symlink loop: %v", err)
 	}
 
-	checksumDB := &ChecksumDB{Checksums: make(map[string]uint64)}
+	checksumDB := &ChecksumDB{Checksums: make(map[string]FileEntry)}
 
 	// This should not hang (WalkDir doesn't follow symlinks into directories)
 	files, err := walkDirectoriesForMissing([]string{tempDir}, checksumDB)
@@ -1425,5 +1425,940 @@ func TestWalkDirectoriesForMissingSymlinkDir(t *testing.T) {
 	}
 	if found[loopLink] {
 		t.Errorf("Expected symlinked directory %s to be skipped", loopLink)
+	}
+}
+
+// --- Helpers for entry metadata ---
+
+func statEntry(t *testing.T, path string, checksum uint64) FileEntry {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Failed to stat %s: %v", path, err)
+	}
+	return FileEntry{Checksum: checksum, Size: info.Size(), ModTime: info.ModTime().UnixNano()}
+}
+
+func checksumOf(t *testing.T, path string) uint64 {
+	t.Helper()
+
+	checksum, err := calculateChecksum(path)
+	if err != nil {
+		t.Fatalf("Failed to checksum %s: %v", path, err)
+	}
+	return checksum
+}
+
+func scanFileFor(t *testing.T, path string) ScanFile {
+	t.Helper()
+
+	entry := statEntry(t, path, checksumOf(t, path))
+	return ScanFile{Path: path, Checksum: entry.Checksum, Size: entry.Size, ModTime: entry.ModTime}
+}
+
+// --- Legacy format and migration ---
+
+func TestLoadChecksumDBRejectsLegacyFormat(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.json")
+	writeTestFile(t, dbPath, []byte(`{"checksums":{"/tmp/file1":1234}}`))
+
+	_, err := loadChecksumDB(dbPath, false)
+	if err == nil {
+		t.Fatal("Expected an error for a legacy-format database")
+	}
+	if !strings.Contains(err.Error(), "migrate") {
+		t.Errorf("Expected the error to point at -mode migrate, got: %v", err)
+	}
+}
+
+func TestMigrateChecksumDB(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "file.txt")
+	writeTestFile(t, filePath, []byte("content"))
+
+	dbPath := filepath.Join(t.TempDir(), "legacy.json")
+	writeTestFile(t, dbPath, []byte(fmt.Sprintf(`{"checksums":{"%s":1234}}`, filePath)))
+
+	if err := migrateChecksumDB(dbPath, false); err != nil {
+		t.Fatalf("Failed to migrate: %v", err)
+	}
+
+	checksumDB, err := loadChecksumDB(dbPath, false)
+	if err != nil {
+		t.Fatalf("Failed to load migrated database: %v", err)
+	}
+
+	entry, ok := checksumDB.Checksums[filePath]
+	if !ok {
+		t.Fatalf("Expected %s in the migrated database", filePath)
+	}
+	if entry.Checksum != 1234 {
+		t.Errorf("Expected checksum 1234 preserved, got %d", entry.Checksum)
+	}
+	// Migration must not invent metadata: stat'ing here would pair a possibly
+	// stale checksum with a fresh timestamp.
+	if entry.Size != 0 || entry.ModTime != 0 {
+		t.Errorf("Expected empty size and timestamp after migration, got size=%d mtime=%d", entry.Size, entry.ModTime)
+	}
+	if entry.MetadataKnown() {
+		t.Error("Expected migrated entry metadata to be unknown")
+	}
+}
+
+func TestMigrateChecksumDBAlreadyCurrent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "current.json")
+	writeTestFile(t, dbPath, []byte(`{"checksums":{"/tmp/file1":{"checksum":1234}}}`))
+	before, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to read database: %v", err)
+	}
+
+	if err := migrateChecksumDB(dbPath, false); err != nil {
+		t.Fatalf("Expected migrating a current database to be a no-op, got: %v", err)
+	}
+
+	after, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to re-read database: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("Expected the database to be left untouched, got: %s", after)
+	}
+}
+
+func TestMigrateChecksumDBMissing(t *testing.T) {
+	if err := migrateChecksumDB(missingPath(t, "nope.json"), false); err == nil {
+		t.Error("Expected an error migrating a nonexistent database")
+	}
+}
+
+// --- Mismatch classification ---
+
+func TestClassifyMismatch(t *testing.T) {
+	known := FileEntry{Checksum: 1, Size: 10, ModTime: 500}
+
+	if got := classifyMismatch(known, 10, 500); got != mismatchCorrupt {
+		t.Errorf("Expected mismatchCorrupt when metadata is unchanged, got %v", got)
+	}
+	if got := classifyMismatch(known, 10, 900); got != mismatchModified {
+		t.Errorf("Expected mismatchModified when the timestamp changed, got %v", got)
+	}
+	if got := classifyMismatch(known, 22, 500); got != mismatchModified {
+		t.Errorf("Expected mismatchModified when the size changed, got %v", got)
+	}
+	if got := classifyMismatch(FileEntry{Checksum: 1}, 10, 500); got != mismatchUnverifiable {
+		t.Errorf("Expected mismatchUnverifiable without recorded metadata, got %v", got)
+	}
+	if !strings.Contains(mismatchCorrupt.String(), "corruption") {
+		t.Errorf("Expected the corrupt description to mention corruption, got %q", mismatchCorrupt.String())
+	}
+}
+
+// --- Move detection ---
+
+func TestResolveMovesOneToOne(t *testing.T) {
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"/old/a.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+		},
+	}
+	discovered := []ScanFile{{Path: "/new/a.jpg", Checksum: 111, Size: 10, ModTime: 2}}
+
+	moves, deleted, added, ambiguous := resolveMoves([]string{"/old/a.jpg"}, discovered, checksumDB, false)
+
+	if len(moves) != 1 || moves[0].From != "/old/a.jpg" || moves[0].To != "/new/a.jpg" {
+		t.Fatalf("Expected one move /old/a.jpg -> /new/a.jpg, got %+v", moves)
+	}
+	if len(deleted) != 0 || len(added) != 0 || ambiguous != 0 {
+		t.Errorf("Expected nothing left over, got deleted=%v added=%v ambiguous=%d", deleted, added, ambiguous)
+	}
+}
+
+func TestResolveMovesDuplicateContentEqualCounts(t *testing.T) {
+	// Duplicate content is normal in a media archive. With equal counts every
+	// pairing produces the same database, so the group is safe to apply.
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"/old/a.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+			"/old/b.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+		},
+	}
+	discovered := []ScanFile{
+		{Path: "/new/a.jpg", Checksum: 111, Size: 10, ModTime: 2},
+		{Path: "/new/b.jpg", Checksum: 111, Size: 10, ModTime: 2},
+	}
+
+	moves, deleted, added, ambiguous := resolveMoves([]string{"/old/a.jpg", "/old/b.jpg"}, discovered, checksumDB, false)
+
+	if len(moves) != 2 {
+		t.Fatalf("Expected two moves, got %+v", moves)
+	}
+	if len(deleted) != 0 || len(added) != 0 || ambiguous != 0 {
+		t.Errorf("Expected nothing left over, got deleted=%v added=%v ambiguous=%d", deleted, added, ambiguous)
+	}
+}
+
+func TestResolveMovesUnequalCountsAreAmbiguous(t *testing.T) {
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"/old/a.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+			"/old/b.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+		},
+	}
+	discovered := []ScanFile{{Path: "/new/a.jpg", Checksum: 111, Size: 10, ModTime: 2}}
+
+	moves, deleted, added, ambiguous := resolveMoves([]string{"/old/a.jpg", "/old/b.jpg"}, discovered, checksumDB, false)
+
+	if len(moves) != 0 {
+		t.Errorf("Expected no moves for an undecidable group, got %+v", moves)
+	}
+	if len(deleted) != 2 || len(added) != 1 {
+		t.Errorf("Expected the group to fall back to 2 deleted and 1 new, got deleted=%v added=%v", deleted, added)
+	}
+	if ambiguous != 3 {
+		t.Errorf("Expected 3 ambiguous paths, got %d", ambiguous)
+	}
+}
+
+func TestResolveMovesStrictRequiresOneToOne(t *testing.T) {
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"/old/a.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+			"/old/b.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+		},
+	}
+	discovered := []ScanFile{
+		{Path: "/new/a.jpg", Checksum: 111, Size: 10, ModTime: 2},
+		{Path: "/new/b.jpg", Checksum: 111, Size: 10, ModTime: 2},
+	}
+	disappeared := []string{"/old/a.jpg", "/old/b.jpg"}
+
+	if moves, _, _, _ := resolveMoves(disappeared, discovered, checksumDB, true); len(moves) != 0 {
+		t.Errorf("Expected strict mode to reject a duplicate group, got %+v", moves)
+	}
+	if moves, _, _, _ := resolveMoves(disappeared[:1], discovered[:1], checksumDB, true); len(moves) != 1 {
+		t.Errorf("Expected strict mode to accept a one-to-one group, got %+v", moves)
+	}
+}
+
+func TestResolveMovesRejectsSizeMismatch(t *testing.T) {
+	// A checksum collision between differently-sized files must not be treated
+	// as a move.
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"/old/a.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+		},
+	}
+	discovered := []ScanFile{{Path: "/new/a.jpg", Checksum: 111, Size: 999, ModTime: 2}}
+
+	moves, deleted, added, _ := resolveMoves([]string{"/old/a.jpg"}, discovered, checksumDB, false)
+	if len(moves) != 0 {
+		t.Errorf("Expected no move when sizes differ, got %+v", moves)
+	}
+	if len(deleted) != 1 || len(added) != 1 {
+		t.Errorf("Expected a deletion and an addition, got deleted=%v added=%v", deleted, added)
+	}
+}
+
+func TestResolveMovesAcceptsUnknownSize(t *testing.T) {
+	// Entries carried over from the legacy format have no size yet, so the
+	// checksum has to stand on its own.
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"/old/a.jpg": {Checksum: 111},
+		},
+	}
+	discovered := []ScanFile{{Path: "/new/a.jpg", Checksum: 111, Size: 10, ModTime: 2}}
+
+	moves, _, _, _ := resolveMoves([]string{"/old/a.jpg"}, discovered, checksumDB, false)
+	if len(moves) != 1 {
+		t.Fatalf("Expected one move when the recorded size is unknown, got %+v", moves)
+	}
+}
+
+func TestResolveMovesNoMatchIsDeletionAndAddition(t *testing.T) {
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"/old/a.jpg": {Checksum: 111, Size: 10, ModTime: 1},
+		},
+	}
+	discovered := []ScanFile{{Path: "/new/z.jpg", Checksum: 222, Size: 10, ModTime: 2}}
+
+	moves, deleted, added, ambiguous := resolveMoves([]string{"/old/a.jpg"}, discovered, checksumDB, false)
+	if len(moves) != 0 || ambiguous != 0 {
+		t.Errorf("Expected no moves and no ambiguity, got moves=%+v ambiguous=%d", moves, ambiguous)
+	}
+	if len(deleted) != 1 || len(added) != 1 {
+		t.Errorf("Expected one deletion and one addition, got deleted=%v added=%v", deleted, added)
+	}
+}
+
+// --- Sync classification ---
+
+func runProcessResults(t *testing.T, mode string, checksumDB *ChecksumDB, results []WorkerResult, opts procOpts) int {
+	t.Helper()
+
+	resultChan := make(chan WorkerResult, len(results))
+	for _, result := range results {
+		resultChan <- result
+	}
+	close(resultChan)
+
+	var processedFiles uint64
+	var outputMu sync.Mutex
+	done := make(chan struct{})
+	count := processResults(resultChan, done, mode, checksumDB, &processedFiles, &outputMu, "", opts)
+	<-done
+	return count
+}
+
+func TestProcessResultsSyncClassification(t *testing.T) {
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"verified":     {Checksum: 1, Size: 10, ModTime: 100},
+			"touched":      {Checksum: 2, Size: 10, ModTime: 100},
+			"nometadata":   {Checksum: 3},
+			"corrupt":      {Checksum: 4, Size: 10, ModTime: 100},
+			"unverifiable": {Checksum: 5},
+			"modified":     {Checksum: 6, Size: 10, ModTime: 100},
+			"disappeared":  {Checksum: 7, Size: 10, ModTime: 100},
+		},
+	}
+
+	state := &syncState{}
+	errorCount := runProcessResults(t, "sync", checksumDB, []WorkerResult{
+		{FilePath: "verified", Checksum: 1, Size: 10, ModTime: 100, Exists: true},
+		{FilePath: "touched", Checksum: 2, Size: 10, ModTime: 777, Exists: true},
+		{FilePath: "nometadata", Checksum: 3, Size: 10, ModTime: 100, Exists: true},
+		{FilePath: "corrupt", Checksum: 99, Size: 10, ModTime: 100, Exists: true},
+		{FilePath: "unverifiable", Checksum: 99, Size: 10, ModTime: 100, Exists: true},
+		{FilePath: "modified", Checksum: 99, Size: 12, ModTime: 900, Exists: true},
+		{FilePath: "disappeared", Exists: false},
+		{FilePath: "discovered", Checksum: 8, Size: 4, ModTime: 200, Exists: true},
+		// A walked file that vanished mid-run was never recorded, so it is not
+		// a deletion.
+		{FilePath: "vanished-while-walking", Exists: false},
+	}, procOpts{sync: state})
+
+	if state.verified != 3 {
+		t.Errorf("Expected 3 verified files, got %d", state.verified)
+	}
+	// Both the drifted timestamp and the missing metadata need recording.
+	if len(state.touched) != 2 {
+		t.Errorf("Expected 2 metadata-only updates, got %+v", state.touched)
+	}
+	if len(state.corrupt) != 1 || state.corrupt[0].Path != "corrupt" {
+		t.Errorf("Expected one corruption suspect, got %+v", state.corrupt)
+	}
+	if len(state.unverifiable) != 1 || state.unverifiable[0].Path != "unverifiable" {
+		t.Errorf("Expected one unverifiable mismatch, got %+v", state.unverifiable)
+	}
+	if len(state.modified) != 1 || state.modified[0].Path != "modified" {
+		t.Errorf("Expected one modified file, got %+v", state.modified)
+	}
+	if len(state.disappeared) != 1 || state.disappeared[0] != "disappeared" {
+		t.Errorf("Expected only the database entry to count as disappeared, got %+v", state.disappeared)
+	}
+	if len(state.discovered) != 1 || state.discovered[0].Path != "discovered" {
+		t.Errorf("Expected one discovered file, got %+v", state.discovered)
+	}
+	// Corruption and unverifiable mismatches are failures; moves and new files
+	// are not.
+	if errorCount != 2 {
+		t.Errorf("Expected 2 errors from suspect mismatches, got %d", errorCount)
+	}
+}
+
+func TestProcessResultsUpdateRefusesSuspectedCorruption(t *testing.T) {
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"rotted": {Checksum: 1, Size: 10, ModTime: 100},
+		},
+	}
+
+	errorCount := runProcessResults(t, "update", checksumDB, []WorkerResult{
+		{FilePath: "rotted", Checksum: 99, Size: 10, ModTime: 100, Exists: true},
+	}, procOpts{})
+
+	if errorCount != 1 {
+		t.Errorf("Expected the refusal to count as an error, got %d", errorCount)
+	}
+	if got := checksumDB.Checksums["rotted"].Checksum; got != 1 {
+		t.Errorf("Expected the stored checksum to be preserved, got %d", got)
+	}
+}
+
+func TestProcessResultsUpdateAcceptsSuspectWithFlag(t *testing.T) {
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"rotted": {Checksum: 1, Size: 10, ModTime: 100},
+		},
+	}
+
+	runProcessResults(t, "update", checksumDB, []WorkerResult{
+		{FilePath: "rotted", Checksum: 99, Size: 10, ModTime: 100, Exists: true},
+	}, procOpts{withCorrupt: true})
+
+	if got := checksumDB.Checksums["rotted"].Checksum; got != 99 {
+		t.Errorf("Expected -with-corrupt to overwrite the checksum, got %d", got)
+	}
+}
+
+func TestProcessResultsUpdateRefreshesMetadata(t *testing.T) {
+	// Content is intact but the timestamp drifted. Leaving the old timestamp in
+	// place would make a later real corruption look like an ordinary edit.
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{
+			"touched": {Checksum: 1, Size: 10, ModTime: 100},
+		},
+	}
+
+	runProcessResults(t, "update", checksumDB, []WorkerResult{
+		{FilePath: "touched", Checksum: 1, Size: 10, ModTime: 555, Exists: true},
+	}, procOpts{})
+
+	entry := checksumDB.Checksums["touched"]
+	if entry.Checksum != 1 || entry.ModTime != 555 {
+		t.Errorf("Expected the timestamp to be refreshed and the checksum kept, got %+v", entry)
+	}
+}
+
+func TestGetSyncFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	known := filepath.Join(tempDir, "known.txt")
+	fresh := filepath.Join(tempDir, "fresh.txt")
+	writeTestFile(t, known, []byte("known"))
+	writeTestFile(t, fresh, []byte("fresh"))
+
+	checksumDB := &ChecksumDB{Checksums: map[string]FileEntry{known: {Checksum: 1}}}
+
+	files, err := getSyncFiles([]string{tempDir}, nil, checksumDB)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	sort.Strings(files)
+	expected := []string{fresh, known}
+	sort.Strings(expected)
+	if !reflect.DeepEqual(files, expected) {
+		t.Errorf("Expected database entries and discovered files, got %v", files)
+	}
+
+	if _, err := getSyncFiles(nil, nil, checksumDB); err == nil {
+		t.Error("Expected an error when sync has no directories to walk")
+	}
+}
+
+func TestResolveDirectoriesSyncUsesConfig(t *testing.T) {
+	configDirs := []string{"/config/photos"}
+
+	if got := resolveDirectories("sync", nil, configDirs); !reflect.DeepEqual(got, configDirs) {
+		t.Errorf("Expected sync to fall back to config directories, got %v", got)
+	}
+	if got := resolveDirectories("sync", []string{"/cli"}, configDirs); !reflect.DeepEqual(got, []string{"/cli"}) {
+		t.Errorf("Expected CLI directories to win, got %v", got)
+	}
+}
+
+// --- Scan report and apply ---
+
+func TestDefaultScanReportPath(t *testing.T) {
+	got := defaultScanReportPath(filepath.Join("/data", "checksums.json"))
+	want := filepath.Join("/data", "checksums.scan.json")
+	if got != want {
+		t.Errorf("Expected %s, got %s", want, got)
+	}
+}
+
+func TestScanReportRoundTrip(t *testing.T) {
+	reportPath := filepath.Join(t.TempDir(), "scan.json")
+	report := &ScanReport{
+		GeneratedAt: 42,
+		DBPath:      "/data/checksums.json",
+		Verified:    7,
+		Moved:       []ScanMove{{From: "/a", To: "/b", Checksum: 5, Size: 3, ModTime: 9}},
+	}
+
+	if err := saveScanReport(reportPath, report); err != nil {
+		t.Fatalf("Failed to save scan report: %v", err)
+	}
+
+	info, err := os.Stat(reportPath)
+	if err != nil {
+		t.Fatalf("Failed to stat scan report: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("Expected the scan report to be owner-only, got %v", info.Mode().Perm())
+	}
+
+	loaded, err := loadScanReport(reportPath)
+	if err != nil {
+		t.Fatalf("Failed to load scan report: %v", err)
+	}
+	if !reflect.DeepEqual(loaded, report) {
+		t.Errorf("Round-trip mismatch. Expected %+v, got %+v", report, loaded)
+	}
+
+	if _, err := loadScanReport(missingPath(t, "absent.json")); err == nil {
+		t.Error("Expected an error for a missing scan report")
+	}
+}
+
+func TestVerifyScanReport(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+	writeTestFile(t, dbPath, []byte(`{"checksums":{}}`))
+	size, modTime := dbFingerprint(dbPath)
+	absDB, err := filepath.Abs(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to resolve database path: %v", err)
+	}
+
+	fresh := func() *ScanReport {
+		return &ScanReport{DBPath: absDB, DBSize: size, DBModTime: modTime}
+	}
+
+	if err := verifyScanReport(fresh(), dbPath, false); err != nil {
+		t.Errorf("Expected a matching report to verify, got: %v", err)
+	}
+
+	partial := fresh()
+	partial.Partial = true
+	if err := verifyScanReport(partial, dbPath, false); err == nil {
+		t.Error("Expected an interrupted scan to be refused")
+	}
+	if err := verifyScanReport(partial, dbPath, true); err != nil {
+		t.Errorf("Expected -force to accept a partial report, got: %v", err)
+	}
+
+	otherDB := fresh()
+	otherDB.DBPath = "/somewhere/else.json"
+	if err := verifyScanReport(otherDB, dbPath, false); err == nil {
+		t.Error("Expected a report for another database to be refused")
+	}
+
+	// The classifications were computed against one specific database.
+	changed := fresh()
+	changed.DBSize = size + 1
+	if err := verifyScanReport(changed, dbPath, false); err == nil {
+		t.Error("Expected a changed database to be refused")
+	}
+}
+
+func TestApplyScanReportMove(t *testing.T) {
+	tempDir := t.TempDir()
+	oldPath := filepath.Join(tempDir, "old.txt")
+	newPath := filepath.Join(tempDir, "new.txt")
+	writeTestFile(t, newPath, []byte("moved content"))
+	moved := scanFileFor(t, newPath)
+
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{oldPath: {Checksum: moved.Checksum, Size: moved.Size, ModTime: 1}},
+	}
+	report := &ScanReport{Moved: []ScanMove{{From: oldPath, To: newPath, Checksum: moved.Checksum, Size: moved.Size, ModTime: moved.ModTime}}}
+
+	stats := applyScanReport(checksumDB, report, applyOpts{})
+
+	if stats.moved != 1 {
+		t.Errorf("Expected one applied move, got %d", stats.moved)
+	}
+	if _, ok := checksumDB.Checksums[oldPath]; ok {
+		t.Error("Expected the old path to be removed from the database")
+	}
+	entry, ok := checksumDB.Checksums[newPath]
+	if !ok {
+		t.Fatal("Expected the new path to be in the database")
+	}
+	if entry.Checksum != moved.Checksum || entry.ModTime != moved.ModTime {
+		t.Errorf("Expected the scanned entry to be written, got %+v", entry)
+	}
+}
+
+func TestApplyScanReportSkipsMoveWhenSourceReturns(t *testing.T) {
+	tempDir := t.TempDir()
+	oldPath := filepath.Join(tempDir, "old.txt")
+	newPath := filepath.Join(tempDir, "new.txt")
+	writeTestFile(t, oldPath, []byte("still here"))
+	writeTestFile(t, newPath, []byte("still here"))
+	moved := scanFileFor(t, newPath)
+
+	checksumDB := &ChecksumDB{Checksums: map[string]FileEntry{oldPath: {Checksum: moved.Checksum}}}
+	report := &ScanReport{Moved: []ScanMove{{From: oldPath, To: newPath, Checksum: moved.Checksum, Size: moved.Size, ModTime: moved.ModTime}}}
+
+	stats := applyScanReport(checksumDB, report, applyOpts{})
+
+	if stats.moved != 0 || stats.stale != 1 {
+		t.Errorf("Expected the move to be skipped, got moved=%d stale=%d", stats.moved, stats.stale)
+	}
+	if _, ok := checksumDB.Checksums[oldPath]; !ok {
+		t.Error("Expected the source entry to be kept when the file is readable again")
+	}
+}
+
+func TestApplyScanReportSkipsStaleFile(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "file.txt")
+	writeTestFile(t, filePath, []byte("scanned"))
+	scanned := scanFileFor(t, filePath)
+
+	// The file changed after the scan, so the recorded checksum no longer
+	// describes it and must not be written.
+	writeTestFile(t, filePath, []byte("changed after the scan"))
+
+	checksumDB := &ChecksumDB{Checksums: make(map[string]FileEntry)}
+	stats := applyScanReport(checksumDB, &ScanReport{New: []ScanFile{scanned}}, applyOpts{})
+
+	if stats.added != 0 || stats.stale != 1 {
+		t.Errorf("Expected the stale file to be skipped, got added=%d stale=%d", stats.added, stats.stale)
+	}
+	if len(checksumDB.Checksums) != 0 {
+		t.Errorf("Expected nothing written to the database, got %+v", checksumDB.Checksums)
+	}
+}
+
+func TestApplyScanReportNewAndTouched(t *testing.T) {
+	tempDir := t.TempDir()
+	newFile := filepath.Join(tempDir, "new.txt")
+	touchedFile := filepath.Join(tempDir, "touched.txt")
+	writeTestFile(t, newFile, []byte("new"))
+	writeTestFile(t, touchedFile, []byte("touched"))
+
+	added := scanFileFor(t, newFile)
+	touched := scanFileFor(t, touchedFile)
+
+	checksumDB := &ChecksumDB{
+		Checksums: map[string]FileEntry{touchedFile: {Checksum: touched.Checksum}},
+	}
+	stats := applyScanReport(checksumDB, &ScanReport{New: []ScanFile{added}, Touched: []ScanFile{touched}}, applyOpts{})
+
+	if stats.added != 1 || stats.touched != 1 {
+		t.Errorf("Expected one addition and one metadata update, got added=%d touched=%d", stats.added, stats.touched)
+	}
+	if entry := checksumDB.Checksums[touchedFile]; !entry.MetadataKnown() {
+		t.Errorf("Expected metadata to be filled in, got %+v", entry)
+	}
+}
+
+func TestApplyScanReportDeletionsNeedFlag(t *testing.T) {
+	// An unmounted volume makes every file under it look deleted, so removals
+	// are never automatic.
+	gone := missingPath(t, "gone.txt")
+	report := &ScanReport{Deleted: []string{gone}}
+
+	checksumDB := &ChecksumDB{Checksums: map[string]FileEntry{gone: {Checksum: 1}}}
+	if stats := applyScanReport(checksumDB, report, applyOpts{}); stats.removed != 0 {
+		t.Errorf("Expected no removals without -with-deleted, got %d", stats.removed)
+	}
+	if _, ok := checksumDB.Checksums[gone]; !ok {
+		t.Error("Expected the entry to survive without -with-deleted")
+	}
+
+	if stats := applyScanReport(checksumDB, report, applyOpts{withDeleted: true}); stats.removed != 1 {
+		t.Errorf("Expected one removal with -with-deleted, got %d", stats.removed)
+	}
+	if _, ok := checksumDB.Checksums[gone]; ok {
+		t.Error("Expected the entry to be removed with -with-deleted")
+	}
+}
+
+func TestApplyScanReportKeepsDeletedFileThatIsBack(t *testing.T) {
+	tempDir := t.TempDir()
+	backAgain := filepath.Join(tempDir, "back.txt")
+	writeTestFile(t, backAgain, []byte("remounted"))
+
+	checksumDB := &ChecksumDB{Checksums: map[string]FileEntry{backAgain: {Checksum: 1}}}
+	stats := applyScanReport(checksumDB, &ScanReport{Deleted: []string{backAgain}}, applyOpts{withDeleted: true})
+
+	if stats.removed != 0 || stats.stale != 1 {
+		t.Errorf("Expected a readable file to be kept, got removed=%d stale=%d", stats.removed, stats.stale)
+	}
+	if _, ok := checksumDB.Checksums[backAgain]; !ok {
+		t.Error("Expected the entry to survive when the file is readable again")
+	}
+}
+
+func TestApplyScanReportCorruptNeedsFlag(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "rotted.txt")
+	writeTestFile(t, filePath, []byte("rotted bytes"))
+	suspect := scanFileFor(t, filePath)
+
+	report := &ScanReport{Corrupt: []ScanFile{suspect}}
+	checksumDB := &ChecksumDB{Checksums: map[string]FileEntry{filePath: {Checksum: 1, Size: suspect.Size, ModTime: suspect.ModTime}}}
+
+	if stats := applyScanReport(checksumDB, report, applyOpts{}); stats.accepted != 0 {
+		t.Errorf("Expected corruption suspects to be left alone, got %d", stats.accepted)
+	}
+	if got := checksumDB.Checksums[filePath].Checksum; got != 1 {
+		t.Errorf("Expected the stored checksum to be preserved, got %d", got)
+	}
+
+	if stats := applyScanReport(checksumDB, report, applyOpts{withCorrupt: true}); stats.accepted != 1 {
+		t.Errorf("Expected -with-corrupt to accept the suspect, got %d", stats.accepted)
+	}
+	if got := checksumDB.Checksums[filePath].Checksum; got != suspect.Checksum {
+		t.Errorf("Expected the observed checksum to be written, got %d", got)
+	}
+}
+
+func TestScanReportEmpty(t *testing.T) {
+	if !(&ScanReport{Verified: 12}).Empty() {
+		t.Error("Expected a report with only verified files to be empty")
+	}
+	if (&ScanReport{New: []ScanFile{{Path: "/a"}}}).Empty() {
+		t.Error("Expected a report with a new file not to be empty")
+	}
+}
+
+// --- End-to-end CLI ---
+
+func buildTestBinary(t *testing.T) string {
+	t.Helper()
+
+	binPath := filepath.Join(t.TempDir(), "checksumtool")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to build binary: %v\n%s", err, out)
+	}
+	return binPath
+}
+
+func readDB(t *testing.T, dbPath string) map[string]FileEntry {
+	t.Helper()
+
+	checksumDB, err := loadChecksumDB(dbPath, false)
+	if err != nil {
+		t.Fatalf("Failed to load database %s: %v", dbPath, err)
+	}
+	return checksumDB.Checksums
+}
+
+func TestSyncDetectsAndAppliesMove(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	stable := filepath.Join(dataDir, "stable.txt")
+	original := filepath.Join(dataDir, "photos", "holiday.jpg")
+	writeTestFile(t, stable, []byte("stable content"))
+	writeTestFile(t, original, []byte("holiday photo content"))
+
+	cmd := hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to seed the database: %v\n%s", err, out)
+	}
+
+	relocated := filepath.Join(dataDir, "archive", "2019", "holiday.jpg")
+	if err := os.MkdirAll(filepath.Dir(relocated), 0o755); err != nil {
+		t.Fatalf("Failed to create the destination directory: %v", err)
+	}
+	if err := os.Rename(original, relocated); err != nil {
+		t.Fatalf("Failed to move the test file: %v", err)
+	}
+
+	// A move is not corruption, so sync must succeed rather than exit 1.
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, dataDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Expected sync to succeed for a moved file, got: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Moved: "+original+" -> "+relocated) {
+		t.Errorf("Expected the move to be reported, got: %s", out)
+	}
+	if strings.Contains(string(out), "Deleted: ") || strings.Contains(string(out), "New: ") {
+		t.Errorf("Expected the move not to be reported as a deletion plus an addition, got: %s", out)
+	}
+
+	// sync is read-only: the database still points at the old path.
+	if _, ok := readDB(t, dbPath)[original]; !ok {
+		t.Error("Expected sync to leave the database untouched")
+	}
+
+	reportPath := defaultScanReportPath(dbPath)
+	if _, err := os.Stat(reportPath); err != nil {
+		t.Fatalf("Expected a scan report at %s: %v", reportPath, err)
+	}
+
+	// apply relocates the entry without re-reading any file.
+	cmd = hermeticCommand(t, binPath, "-mode", "apply", "-db", dbPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Expected apply to succeed, got: %v\n%s", err, out)
+	}
+
+	entries := readDB(t, dbPath)
+	if _, ok := entries[original]; ok {
+		t.Error("Expected the old path to be gone from the database")
+	}
+	entry, ok := entries[relocated]
+	if !ok {
+		t.Fatal("Expected the new path to be in the database")
+	}
+	if entry.Checksum != checksumOf(t, relocated) {
+		t.Errorf("Expected the relocated entry to keep its checksum, got %d", entry.Checksum)
+	}
+	if !entry.MetadataKnown() {
+		t.Errorf("Expected size and timestamp to be recorded, got %+v", entry)
+	}
+
+	// The applied report is removed so it cannot be applied twice.
+	if _, err := os.Stat(reportPath); !os.IsNotExist(err) {
+		t.Errorf("Expected the applied scan report to be removed, got err=%v", err)
+	}
+}
+
+func TestSyncApplyOneShotAndCorruptionExitCode(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	filePath := filepath.Join(dataDir, "photo.jpg")
+	writeTestFile(t, filePath, []byte("original content"))
+
+	cmd := hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to seed the database: %v\n%s", err, out)
+	}
+
+	// Rewrite the content while restoring the original size and timestamp, which
+	// is what bit rot looks like from the filesystem's point of view.
+	before, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Failed to stat the test file: %v", err)
+	}
+	// Same length as the original, so only the content differs.
+	if err := os.WriteFile(filePath, []byte("corrupted conten"), 0o644); err != nil {
+		t.Fatalf("Failed to rewrite the test file: %v", err)
+	}
+	if err := os.Chtimes(filePath, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("Failed to restore the timestamp: %v", err)
+	}
+
+	newFile := filepath.Join(dataDir, "fresh.jpg")
+	writeTestFile(t, newFile, []byte("a brand new file"))
+
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-apply", "-db", dbPath, dataDir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected a non-zero exit when corruption is suspected, got: %s", out)
+	}
+	if !strings.Contains(string(out), "likely corruption") {
+		t.Errorf("Expected the mismatch to be reported as likely corruption, got: %s", out)
+	}
+
+	entries := readDB(t, dbPath)
+	// The new file is applied in the same run; the suspect entry is not.
+	if _, ok := entries[newFile]; !ok {
+		t.Error("Expected the new file to be added by sync -apply")
+	}
+	if entries[filePath].Checksum != checksumOf(t, newFile) && entries[filePath].Checksum == checksumOf(t, filePath) {
+		t.Error("Expected the suspected-corrupt checksum not to be overwritten")
+	}
+}
+
+func TestMigrateCLI(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	filePath := filepath.Join(dataDir, "file.txt")
+	writeTestFile(t, filePath, []byte("legacy content"))
+	legacyChecksum := checksumOf(t, filePath)
+	writeTestFile(t, dbPath, []byte(fmt.Sprintf(`{"checksums":{"%s":%d}}`, filePath, legacyChecksum)))
+
+	// Every other mode refuses a legacy database and says what to do.
+	cmd := hermeticCommand(t, binPath, "-mode", "check", "-db", dbPath)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected check to refuse a legacy database, got: %s", out)
+	}
+	if !strings.Contains(string(out), "-mode migrate") {
+		t.Errorf("Expected the error to name the migrate mode, got: %s", out)
+	}
+
+	cmd = hermeticCommand(t, binPath, "-mode", "migrate", "-db", dbPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Expected migrate to succeed, got: %v\n%s", err, out)
+	}
+
+	entry, ok := readDB(t, dbPath)[filePath]
+	if !ok {
+		t.Fatalf("Expected %s to survive migration", filePath)
+	}
+	if entry.Checksum != legacyChecksum {
+		t.Errorf("Expected the checksum to be preserved, got %d", entry.Checksum)
+	}
+	if entry.MetadataKnown() {
+		t.Errorf("Expected migration to leave metadata empty, got %+v", entry)
+	}
+
+	cmd = hermeticCommand(t, binPath, "-mode", "check", "-db", dbPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("Expected check to work after migration, got: %v\n%s", err, out)
+	}
+}
+
+func TestHelpDescribesModes(t *testing.T) {
+	binPath := buildTestBinary(t)
+
+	cmd := hermeticCommand(t, binPath, "-help")
+	out, _ := cmd.CombinedOutput()
+	help := string(out)
+
+	for _, needed := range []string{
+		"sync", "apply", "migrate", "check", "update",
+		"list-missing", "add-missing", "list-deleted", "remove-deleted",
+		"corrupt", "unverifiable", "-with-corrupt", "-with-deleted", "-strict-moves",
+		"Exit codes",
+	} {
+		if !strings.Contains(help, needed) {
+			t.Errorf("Expected -help to document %q, got:\n%s", needed, help)
+		}
+	}
+}
+
+func TestSyncRequiresDirectories(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	cmd := hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected sync without directories to fail, got: %s", out)
+	}
+	if !strings.Contains(string(out), "requires at least one directory") {
+		t.Errorf("Expected a directory requirement message, got: %s", out)
+	}
+}
+
+func TestApplyRefusesStaleReport(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+
+	writeTestFile(t, filepath.Join(dataDir, "file.txt"), []byte("content"))
+	cmd := hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to seed the database: %v\n%s", err, out)
+	}
+
+	writeTestFile(t, filepath.Join(dataDir, "second.txt"), []byte("second"))
+	cmd = hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Expected sync to succeed, got: %v\n%s", err, out)
+	}
+
+	// Changing the database invalidates the classifications in the report.
+	cmd = hermeticCommand(t, binPath, "-mode", "add-missing", "-db", dbPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to modify the database: %v\n%s", err, out)
+	}
+
+	cmd = hermeticCommand(t, binPath, "-mode", "apply", "-db", dbPath)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected apply to refuse a report for a changed database, got: %s", out)
+	}
+	if !strings.Contains(string(out), "changed since the scan") {
+		t.Errorf("Expected a stale-report message, got: %s", out)
 	}
 }
