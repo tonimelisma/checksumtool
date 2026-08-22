@@ -618,7 +618,7 @@ func TestWalkDirectoriesForMissingRootSymlinkDir(t *testing.T) {
 		t.Fatalf("Failed to create symlinked directory: %v", err)
 	}
 
-	checksumDB := &ChecksumDB{Checksums: make(map[string]uint64)}
+	checksumDB := &ChecksumDB{Checksums: make(map[string]FileEntry)}
 	files, err := walkDirectoriesForMissing([]string{linkPath}, checksumDB)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -2360,5 +2360,66 @@ func TestApplyRefusesStaleReport(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "changed since the scan") {
 		t.Errorf("Expected a stale-report message, got: %s", out)
+	}
+}
+
+func TestWalkDirectoriesForMissingKeepsAncestorSymlinkPrefix(t *testing.T) {
+	// Resolving ancestors would move the walk into a different path space than
+	// the database, which is keyed by filepath.Abs, and every recorded file
+	// would then look like it was missing.
+	tempDir := t.TempDir()
+	actualDir := filepath.Join(tempDir, "actual", "data")
+	writeTestFile(t, filepath.Join(actualDir, "file.txt"), []byte("content"))
+
+	linkedParent := filepath.Join(tempDir, "linkparent")
+	if err := os.Symlink(filepath.Join(tempDir, "actual"), linkedParent); err != nil {
+		t.Fatalf("Failed to create symlinked parent: %v", err)
+	}
+
+	scanRoot := filepath.Join(linkedParent, "data")
+	viaLink := filepath.Join(scanRoot, "file.txt")
+
+	checksumDB := &ChecksumDB{Checksums: make(map[string]FileEntry)}
+	files, err := walkDirectoriesForMissing([]string{scanRoot}, checksumDB)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(files, []string{viaLink}) {
+		t.Fatalf("Expected the given path prefix to be preserved (%s), got %v", viaLink, files)
+	}
+
+	// The same path must be recognised as already recorded on the next walk.
+	checksumDB.Checksums[viaLink] = FileEntry{Checksum: 1}
+	files, err = walkDirectoriesForMissing([]string{scanRoot}, checksumDB)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("Expected the recorded file to be recognised, got %v", files)
+	}
+}
+
+func TestResolveWalkRootFollowsSymlinkChain(t *testing.T) {
+	tempDir := t.TempDir()
+	targetDir := filepath.Join(tempDir, "target")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("Failed to create target directory: %v", err)
+	}
+
+	first := filepath.Join(tempDir, "first")
+	second := filepath.Join(tempDir, "second")
+	if err := os.Symlink(targetDir, first); err != nil {
+		t.Fatalf("Failed to create first symlink: %v", err)
+	}
+	if err := os.Symlink(first, second); err != nil {
+		t.Fatalf("Failed to create second symlink: %v", err)
+	}
+
+	resolved, err := resolveWalkRoot(second)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if resolved != targetDir {
+		t.Errorf("Expected the chain to resolve to %s, got %s", targetDir, resolved)
 	}
 }

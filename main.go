@@ -379,6 +379,14 @@ func walkDirectoriesForMissing(directories []string, checksumDB *ChecksumDB) ([]
 	return files, nil
 }
 
+// resolveWalkRoot follows a symlinked scan root to the directory it points at,
+// so passing a symlink walks the target instead of stopping at the link.
+//
+// Only the root itself is resolved, never its ancestors. filepath.EvalSymlinks
+// would resolve every component, which silently moves the walk into a different
+// path space than the database: on macOS /var is a symlink to /private/var, so
+// resolving ancestors makes every walked file fail to match its database entry,
+// which is keyed by filepath.Abs.
 func resolveWalkRoot(directory string) (string, error) {
 	info, err := os.Stat(directory)
 	if err != nil {
@@ -388,11 +396,27 @@ func resolveWalkRoot(directory string) (string, error) {
 		return directory, nil
 	}
 
-	resolved, err := filepath.EvalSymlinks(directory)
-	if err != nil {
-		return "", err
+	resolved := directory
+	for i := 0; i < 32; i++ {
+		linkInfo, err := os.Lstat(resolved)
+		if err != nil {
+			return "", err
+		}
+		if linkInfo.Mode()&os.ModeSymlink == 0 {
+			return resolved, nil
+		}
+
+		target, err := os.Readlink(resolved)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(resolved), target)
+		}
+		resolved = filepath.Clean(target)
 	}
-	return resolved, nil
+
+	return "", fmt.Errorf("too many levels of symbolic links resolving scan root %q", directory)
 }
 
 // dbPathsInScope returns the absolute database paths covered by the given
