@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -135,6 +137,25 @@ func TestWorkerMissingFile(t *testing.T) {
 	}
 	if result.Exists {
 		t.Error("Expected Exists to be false for a missing file")
+	}
+}
+
+func TestWorkerTreatsDanglingSymlinkAsReadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dangling")
+	if err := os.Symlink(filepath.Join(filepath.Dir(path), "absent-target"), path); err != nil {
+		t.Fatal(err)
+	}
+	jobs := make(chan string, 1)
+	results := make(chan WorkerResult, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go worker(jobs, results, true, &wg)
+	jobs <- path
+	close(jobs)
+	wg.Wait()
+	result := <-results
+	if result.Err == nil || result.Exists {
+		t.Fatalf("dangling symlink was treated as a confirmed absence: %+v", result)
 	}
 }
 
@@ -2212,6 +2233,273 @@ func TestSyncDetectsAndAppliesMove(t *testing.T) {
 	}
 }
 
+func TestSyncWritesVersionedObservationManifest(t *testing.T) {
+	binPath := buildTestBinary(t)
+	dataDir := t.TempDir()
+	tracked := filepath.Join(dataDir, "tracked.txt")
+	newPath := filepath.Join(dataDir, "new.txt")
+	writeTestFile(t, tracked, []byte("known"))
+	writeTestFile(t, newPath, []byte("new"))
+	checksum, err := calculateChecksum(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+	db := &ChecksumDB{Checksums: map[string]FileEntry{tracked: {Checksum: checksum}}}
+	if err := saveChecksumDB(dbPath, db, false); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "observations.json")
+	cmd := hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, "-manifest", manifestPath, dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sync failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := &ObservationManifest{}
+	if err := json.Unmarshal(data, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SchemaVersion != 1 || manifest.Partial || len(manifest.Observations) != 2 {
+		t.Fatalf("unexpected manifest header or observation count: %+v", manifest)
+	}
+	seen := map[string]bool{}
+	var newID string
+	for _, item := range manifest.Observations {
+		seen[item.Path] = true
+		if item.Path == newPath {
+			newID = item.ObservationID
+			if item.Category != "new" {
+				t.Errorf("new file category = %q, want new", item.Category)
+			}
+		}
+		if item.Path == tracked && item.Category != "verified" {
+			t.Errorf("tracked file category = %q, want verified", item.Category)
+		}
+		if item.Root != dataDir || item.ScanID != manifest.ScanID || item.ObservationID == "" || item.Observed == nil {
+			t.Errorf("incomplete observation: %+v", item)
+		}
+	}
+	if !seen[tracked] || !seen[newPath] {
+		t.Fatalf("manifest omitted a verified or new file: %+v", seen)
+	}
+	info, err := os.Stat(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("manifest mode = %o, want 600", info.Mode().Perm())
+	}
+	cmd = hermeticCommand(t, binPath, "-mode", "apply-observations", "-db", dbPath, "-manifest", manifestPath, "-select", newID)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("selective apply failed: %v\n%s", err, out)
+	}
+	if _, ok := readDB(t, dbPath)[newPath]; !ok {
+		t.Fatal("selected new-file observation was not applied")
+	}
+}
+
+func TestManifestKeepsPositiveEvidenceButDoesNotInferMissingRootDeletion(t *testing.T) {
+	binPath := buildTestBinary(t)
+	goodRoot := t.TempDir()
+	goodPath := filepath.Join(goodRoot, "kept.txt")
+	writeTestFile(t, goodPath, []byte("known bytes"))
+	missingRoot := filepath.Join(t.TempDir(), "not-mounted")
+	missingPath := filepath.Join(missingRoot, "lost.txt")
+	checksum, info, err := calculateStableChecksum(goodPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+	db := &ChecksumDB{Checksums: map[string]FileEntry{
+		goodPath:    {Checksum: checksum, Size: info.Size(), ModTime: info.ModTime().UnixNano()},
+		missingPath: {Checksum: 123, Size: 4, ModTime: 5},
+	}}
+	if err := saveChecksumDB(dbPath, db, false); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "partial.json")
+	cmd := hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, "-manifest", manifestPath, goodRoot, missingRoot)
+	_, _ = cmd.CombinedOutput() // A missing root is a reported, non-zero partial result.
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := &ObservationManifest{}
+	if err := json.Unmarshal(data, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.Partial {
+		t.Fatal("manifest did not mark incomplete root coverage")
+	}
+	statuses := map[string]string{}
+	for _, c := range manifest.Coverage {
+		statuses[c.Root] = c.Status
+	}
+	if statuses[goodRoot] != "complete" || statuses[missingRoot] != "missing" {
+		t.Fatalf("unexpected root coverage: %+v", statuses)
+	}
+	seenGood, seenMissing := false, false
+	for _, item := range manifest.Observations {
+		if item.Path == goodPath && item.Category == "verified" {
+			seenGood = true
+		}
+		if item.Path == missingPath && item.Category == "unconfirmed_absence" {
+			seenMissing = true
+		}
+	}
+	if !seenGood || !seenMissing {
+		t.Fatalf("positive evidence or safe missing-root classification was lost: %+v", manifest.Observations)
+	}
+}
+
+func TestManifestMoveSourceCannotBeAppliedSeparately(t *testing.T) {
+	binPath := buildTestBinary(t)
+	root := t.TempDir()
+	from := filepath.Join(root, "old.txt")
+	to := filepath.Join(root, "new.txt")
+	writeTestFile(t, from, []byte("move payload"))
+	checksum, info, err := calculateStableChecksum(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+	db := &ChecksumDB{Checksums: map[string]FileEntry{from: {Checksum: checksum, Size: info.Size(), ModTime: info.ModTime().UnixNano()}}}
+	if err := saveChecksumDB(dbPath, db, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(from, to); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "move.json")
+	cmd := hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, "-manifest", manifestPath, root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("move scan failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := &ObservationManifest{}
+	if err := json.Unmarshal(data, manifest); err != nil {
+		t.Fatal(err)
+	}
+	selected := make([]string, 0, 2)
+	for _, item := range manifest.Observations {
+		if item.Category == "moved" || item.Category == "move_source" {
+			selected = append(selected, item.ObservationID)
+		}
+	}
+	if len(selected) != 2 {
+		t.Fatalf("expected paired move observations, got %+v", manifest.Observations)
+	}
+	cmd = hermeticCommand(t, binPath, "-mode", "apply-observations", "-db", dbPath, "-manifest", manifestPath, "-select", strings.Join(selected, ","))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("move selection failed: %v\n%s", err, out)
+	}
+	var results []ObservationApplyResult
+	if err := json.Unmarshal(out, &results); err != nil {
+		t.Fatalf("apply output is not structured JSON: %v\n%s", err, out)
+	}
+	statuses := map[string]string{}
+	for _, result := range results {
+		statuses[result.Category] = result.Status
+	}
+	if statuses["moved"] != "applied" || statuses["move_source"] != "skipped" {
+		t.Fatalf("move was not applied as one selected transition: %+v", statuses)
+	}
+	entries := readDB(t, dbPath)
+	if _, ok := entries[from]; ok || entries[to].Checksum != checksum {
+		t.Fatalf("move baseline is incorrect: %+v", entries)
+	}
+}
+
+func TestManifestRootWalkRetainsPositiveFilesOnUnreadableSubtree(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission test requires an unprivileged user")
+	}
+	root := t.TempDir()
+	positive := filepath.Join(root, "a-readable.txt")
+	blocked := filepath.Join(root, "z-blocked")
+	writeTestFile(t, positive, []byte("readable"))
+	if err := os.Mkdir(blocked, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blocked, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(blocked, 0700)
+	files, coverage := walkManifestRoot(root, &ChecksumDB{Checksums: map[string]FileEntry{}})
+	if coverage.Status != "incomplete" || coverage.Error == "" {
+		t.Fatalf("unreadable subtree was not represented: %+v", coverage)
+	}
+	if len(files) != 1 || files[0] != positive {
+		t.Fatalf("completed positive enumeration was lost: files=%v coverage=%+v", files, coverage)
+	}
+}
+
+func TestManifestKeepsDatabaseObservationsOutsideWalkRootsUncovered(t *testing.T) {
+	binPath := buildTestBinary(t)
+	base := t.TempDir()
+	root := filepath.Join(base, "configured")
+	outsideRoot := filepath.Join(base, "outside")
+	inside := filepath.Join(root, "inside.txt")
+	outside := filepath.Join(outsideRoot, "outside.txt")
+	writeTestFile(t, inside, []byte("inside"))
+	writeTestFile(t, outside, []byte("outside"))
+	insideHash, insideInfo, err := calculateStableChecksum(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsideHash, outsideInfo, err := calculateStableChecksum(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "checksums.json")
+	db := &ChecksumDB{Checksums: map[string]FileEntry{
+		inside:  {Checksum: insideHash, Size: insideInfo.Size(), ModTime: insideInfo.ModTime().UnixNano()},
+		outside: {Checksum: outsideHash, Size: outsideInfo.Size(), ModTime: outsideInfo.ModTime().UnixNano()},
+	}}
+	if err := saveChecksumDB(dbPath, db, false); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(config, []byte("directories = ["+strconv.Quote(root)+"]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	cmd := hermeticCommand(t, binPath, "-mode", "sync", "-db", dbPath, "-config", config, "-manifest", manifestPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sync failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := &ObservationManifest{}
+	if err := json.Unmarshal(data, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.Partial {
+		t.Fatal("uncovered tracked path did not make the manifest partial")
+	}
+	seenOutside := false
+	for _, item := range manifest.Observations {
+		if item.Path == outside && item.Category == "verified" && item.Root == outsideRoot {
+			seenOutside = true
+		}
+	}
+	if !seenOutside {
+		t.Fatalf("tracked path outside walk roots was omitted: %+v", manifest.Observations)
+	}
+	if rootCoverageComplete(manifest, outsideRoot) {
+		t.Fatal("positive observation outside the walk was treated as deletion coverage")
+	}
+}
+
 func TestSyncApplyOneShotAndCorruptionExitCode(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2626,5 +2914,239 @@ func TestScanReportConcerning(t *testing.T) {
 	}
 	if got := alarming.Concerning(); got != 4 {
 		t.Errorf("Expected all four categories to count, got %d", got)
+	}
+}
+
+func TestCalculateStableChecksumReturnsOpenedIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(path, []byte("stable bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	checksum, info, err := calculateStableChecksum(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyChecksum, err := calculateChecksum(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checksum != legacyChecksum {
+		t.Fatalf("stable checksum %d differs from legacy checksum %d", checksum, legacyChecksum)
+	}
+	if info.Size() != int64(len("stable bytes")) {
+		t.Fatalf("unexpected stable size %d", info.Size())
+	}
+}
+
+func TestStableSnapshotDetectsSameSizeRewriteWithRestoredMtime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(path, []byte("first bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("other bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameFileSnapshot(before, after) {
+		t.Fatal("same-size rewrite with restored mtime was treated as the original snapshot")
+	}
+}
+
+func TestObservationIdentityBindsClassificationAndFacts(t *testing.T) {
+	base := FileObservation{Path: "/archive/a", Category: "verified", ScanID: "scan-1", Observed: &FileEntry{Checksum: 42, Size: 5, ModTime: 7}}
+	setObservationIdentity(&base)
+	first := base.ObservationID
+	setObservationIdentity(&base)
+	if base.ObservationID != first || first == "" {
+		t.Fatal("observation identity is not stable")
+	}
+	base.Category = "modified"
+	setObservationIdentity(&base)
+	if base.ObservationID == first {
+		t.Fatal("changing the classification did not change observation identity")
+	}
+}
+
+func TestApplyObservationSelectiveCompareAndSwap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tracked.txt")
+	writeTestFile(t, path, []byte("edited bytes"))
+	checksum, info, err := calculateStableChecksum(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := FileEntry{Checksum: 11, Size: 10, ModTime: 20}
+	item := FileObservation{Root: filepath.Dir(path), Path: path, Category: "modified", ScanID: "scan-a", Baseline: &baseline,
+		Observed: &FileEntry{Checksum: checksum, Size: info.Size(), ModTime: info.ModTime().UnixNano()}}
+	setObservationIdentity(&item)
+	manifest := &ObservationManifest{SchemaVersion: 1, ScanID: "scan-a", Coverage: []RootCoverage{{Root: filepath.Dir(path), Status: "complete"}}, Observations: []FileObservation{item}}
+	unrelated := filepath.Join(filepath.Dir(path), "other.txt")
+	db := &ChecksumDB{Checksums: map[string]FileEntry{path: baseline, unrelated: {Checksum: 77}}}
+	// Simulate a separate operation updating an unrelated DB entry after scan.
+	db.Checksums[unrelated] = FileEntry{Checksum: 88}
+	selected := map[string]bool{item.ObservationID: true}
+	results, changed, err := applyObservationManifest(db, manifest, selected, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || len(results) != 1 || results[0].Status != "applied" {
+		t.Fatalf("unexpected selective apply result: changed=%v results=%+v", changed, results)
+	}
+	if db.Checksums[unrelated].Checksum != 88 || db.Checksums[path].Checksum != checksum {
+		t.Fatalf("selective application modified the wrong entries: %+v", db.Checksums)
+	}
+
+	db.Checksums[path] = baseline
+	writeTestFile(t, path, []byte("changed after review"))
+	results, changed, err = applyObservationManifest(db, manifest, selected, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || results[0].Status != "conflicted" {
+		t.Fatalf("newer file bytes were accepted: changed=%v results=%+v", changed, results)
+	}
+}
+
+func TestTargetedRecheckCannotConfirmDeletion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "restored.txt")
+	db := &ChecksumDB{Checksums: map[string]FileEntry{path: {Checksum: 99, Size: 7, ModTime: 10}}}
+	manifest, count := buildTargetedManifest([]string{path}, db)
+	if count == 0 || len(manifest.Observations) != 1 || manifest.Observations[0].Category != "unconfirmed_absence" {
+		t.Fatalf("targeted recheck did not preserve uncertainty: count=%d manifest=%+v", count, manifest)
+	}
+	if !manifest.Partial || manifest.Coverage[0].Status != "targeted" {
+		t.Fatalf("targeted manifest claims complete coverage: %+v", manifest)
+	}
+	results, changed, err := applyObservationManifest(db, manifest, map[string]bool{manifest.Observations[0].ObservationID: true}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || results[0].Status != "skipped" || db.Checksums[path].Checksum != 99 {
+		t.Fatalf("targeted check authorized a deletion: changed=%v results=%+v", changed, results)
+	}
+}
+
+func TestDeletionApplyRefusesAReplacedSourceRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "archive")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "gone.txt")
+	baseline := FileEntry{Checksum: 33, Size: 4, ModTime: 8}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	coverage := RootCoverage{Root: root, Status: "complete", Device: uint64(stat.Dev), Inode: stat.Ino}
+	item := FileObservation{Root: root, RootDevice: coverage.Device, RootInode: coverage.Inode, Path: path, Category: "deleted", ScanID: "delete-scan", Baseline: &baseline}
+	setObservationIdentity(&item)
+	manifest := &ObservationManifest{SchemaVersion: 1, ScanID: item.ScanID, Coverage: []RootCoverage{coverage}, Observations: []FileObservation{item}}
+	if err := os.Rename(root, root+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	db := &ChecksumDB{Checksums: map[string]FileEntry{path: baseline}}
+	results, changed, err := applyObservationManifest(db, manifest, map[string]bool{item.ObservationID: true}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || results[0].Status != "conflicted" || db.Checksums[path] != baseline {
+		t.Fatalf("deletion was applied after root replacement: changed=%v results=%+v", changed, results)
+	}
+}
+
+func TestApplyMovedObservationAtomicallyAndIdempotently(t *testing.T) {
+	dir := t.TempDir()
+	from := filepath.Join(dir, "old.txt")
+	to := filepath.Join(dir, "new.txt")
+	writeTestFile(t, from, []byte("moved bytes"))
+	oldChecksum, err := calculateChecksum(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(from, to); err != nil {
+		t.Fatal(err)
+	}
+	checksum, info, err := calculateStableChecksum(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	baseline := FileEntry{Checksum: oldChecksum, Size: info.Size(), ModTime: 1}
+	item := FileObservation{Root: dir, Path: to, OriginalPath: from, Category: "moved", ScanID: "scan-move", Baseline: &baseline,
+		Observed: &FileEntry{Checksum: checksum, Size: info.Size(), ModTime: info.ModTime().UnixNano()}, Device: uint64(stat.Dev), Inode: stat.Ino}
+	setObservationIdentity(&item)
+	manifest := &ObservationManifest{SchemaVersion: 1, ScanID: item.ScanID, Coverage: []RootCoverage{{Root: dir, Status: "complete"}}, Observations: []FileObservation{item}}
+	db := &ChecksumDB{Checksums: map[string]FileEntry{from: baseline}}
+	selected := map[string]bool{item.ObservationID: true}
+	results, changed, err := applyObservationManifest(db, manifest, selected, false, false)
+	if err != nil || !changed || results[0].Status != "applied" {
+		t.Fatalf("move application failed: changed=%v results=%+v err=%v", changed, results, err)
+	}
+	if _, ok := db.Checksums[from]; ok || db.Checksums[to].Checksum != checksum {
+		t.Fatalf("move was not applied as one baseline change: %+v", db.Checksums)
+	}
+	results, changed, err = applyObservationManifest(db, manifest, selected, false, false)
+	if err != nil || changed || results[0].Status != "already_applied" {
+		t.Fatalf("move replay was not idempotent: changed=%v results=%+v err=%v", changed, results, err)
+	}
+}
+
+func TestVerifyObservationManifestAgainstAlternateRoot(t *testing.T) {
+	source := t.TempDir()
+	target := t.TempDir()
+	relative := "leading # and unicode-å.txt"
+	sourcePath := filepath.Join(source, relative)
+	targetPath := filepath.Join(target, relative)
+	writeTestFile(t, sourcePath, []byte("same content"))
+	writeTestFile(t, targetPath, []byte("same content"))
+	checksum, info, err := calculateStableChecksum(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := FileObservation{Root: source, Path: sourcePath, Category: "new", ScanID: "copy-check",
+		Observed: &FileEntry{Checksum: checksum, Size: info.Size(), ModTime: info.ModTime().UnixNano()}}
+	setObservationIdentity(&item)
+	manifest := &ObservationManifest{SchemaVersion: 1, ScanID: item.ScanID, Observations: []FileObservation{item}}
+	selected := map[string]bool{item.ObservationID: true}
+	results, err := verifyObservationManifest(manifest, selected, target)
+	if err != nil || len(results) != 1 || results[0].Status != "verified" {
+		t.Fatalf("matching alternate tree did not verify: results=%+v err=%v", results, err)
+	}
+	if err := os.WriteFile(targetPath, []byte("different!!"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	results, err = verifyObservationManifest(manifest, selected, target)
+	if err != nil || results[0].Status != "failed" {
+		t.Fatalf("changed alternate bytes were accepted: results=%+v err=%v", results, err)
+	}
+	escapeRoot := t.TempDir()
+	escapePath := filepath.Join(escapeRoot, "escape.txt")
+	if err := os.WriteFile(escapePath, []byte("same content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(targetPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(escapePath, targetPath); err != nil {
+		t.Fatal(err)
+	}
+	results, err = verifyObservationManifest(manifest, selected, target)
+	if err != nil || results[0].Status != "failed" {
+		t.Fatalf("alternate-root symlink escape was accepted: results=%+v err=%v", results, err)
 	}
 }

@@ -11,6 +11,7 @@ My personal use case is to detect bit rot in any pictures. Throughout the years 
 - Tell suspected corruption apart from ordinary edits, using the recorded size and timestamp
 - Detect moved files and relocate their database entry instead of reporting a deletion plus an addition
 - Scan once, review, then apply without re-reading a single file
+- Optional schema-versioned observation manifests for machine consumers
 - Update the checksum database with new or changed files
 - List files that are missing from the checksum database
 - Add checksums for missing files to the database
@@ -29,9 +30,12 @@ checksumtool [flags] [directories...]
 - `-db string`: Checksum database file location (default `$HOME/.local/share/checksumtool/checksums.json`)
 - `-config string`: Config file location (default `$HOME/.config/checksumtool/config.toml`)
 - `-verbose`: Enable verbose output. Suppressed when stdout is not a terminal, so an unattended run does not mail its progress chatter
-- `-mode string`: Operation mode: sync, apply, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate
+- `-mode string`: Operation mode: sync, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate
 - `-workers int`: Number of worker goroutines (default 4)
 - `-scan-report string`: Scan report location (default: alongside the database, as `<db>.scan.json`)
+- `-manifest string`: With `sync` or `recheck`, write a versioned observation manifest; with `apply-observations` or `verify-manifest`, read one.
+- `-select string`: With `apply-observations`, comma-separated observation identities to consider. No unselected finding is applied.
+- `-accept-suspect`: With `apply-observations`, explicitly accept selected modified, corrupt or unverifiable content after its bytes are re-read and matched.
 - `-apply`: With `sync`, write the scan results to the database in the same run
 - `-with-deleted`: When applying, also remove entries whose file is gone
 - `-with-corrupt`: When updating or applying, also accept content changes that could not be told apart from corruption
@@ -42,6 +46,9 @@ checksumtool [flags] [directories...]
 ### Operation Modes
 - `sync`: One pass over everything. Verifies database entries, walks the directories for files not yet recorded, and classifies each file as verified, modified, corrupt, moved, new or deleted. Lists only the findings that need a decision — changed, corrupt, unverifiable and deleted files — while moves and additions are summarized as counts unless `-list-all` is given. Reports only and writes a scan report; add `-apply` to write the results in the same run. Requires at least one directory (from arguments or the config file). Exits with code 1 if any concerning finding is present or a file could not be read.
 - `apply`: Apply a scan report written by a previous `sync` run, without re-reading any file contents. Applies moved, new, modified and metadata-only changes; deletions and corruption suspects need `-with-deleted` / `-with-corrupt`.
+- `apply-observations`: Selectively apply identities from a versioned manifest. Per-entry baseline comparisons let unrelated database changes coexist; selected bytes are re-read and matched before writing. Results are emitted per item as JSON. Suspect content requires `-accept-suspect`; absence requires `-with-deleted` and complete root coverage.
+- `recheck`: Re-hash only the supplied paths and write their current classifications to a partial, targeted manifest. Pair with `apply-observations` to reconsider a restored file without rescanning its tree. A targeted check cannot authorize deletion.
+- `verify-manifest`: Verify selected observations against an alternate copy of one source root. Reads the copy and manifest only; it does not write the checksum database.
 - `check`: Compare checksums of files against the stored database and report any mismatches. Exits with code 1 if any mismatches are found. Directories are optional; if omitted, all DB entries are checked.
 - `update`: Update the checksum database with new or changed files. Refuses to overwrite an entry whose mismatch looks like corruption unless `-with-corrupt` is passed. Directories are optional.
 - `list-missing`: List files that are missing from the checksum database. Requires at least one directory.
@@ -136,6 +143,56 @@ Deletions are never applied unless `-with-deleted` is given: an unmounted volume
 
 Verify everything in the database, discover new files under "Pictures", and report moves, additions, deletions and suspected corruption without changing anything.
 
+`checksumtool -mode sync -manifest /var/tmp/checksum-observations.json ~/Pictures`
+
+Write an opt-in machine-readable manifest alongside the ordinary scan report.
+The manifest declares `schema_version: 1` independently of the checksum
+database format. Each completed observation carries its path, category,
+baseline when present, observed xxhash/size/mtime, source device/inode when
+available, scan identity, and an observation identity. It is evidence only;
+it does not authorize baseline changes or uploads/deletions. Interrupted scans
+are marked partial and keep completed positive observations. Consumers may use
+deletion observations only when that specific root's coverage is complete;
+missing, unreadable and incomplete roots never establish absence.
+Existing sync reports and default behavior are unchanged.
+
+To accept one reviewed modified file, copy its `observation_id` from the
+manifest and run:
+
+```bash
+checksumtool -mode apply-observations -manifest /var/tmp/checksum-observations.json -select OBSERVATION_ID -accept-suspect
+```
+
+The selected baseline entry is compared with the value recorded in that
+observation. A concurrent unrelated database update does not invalidate it;
+a changed file, a changed target entry, or an identity whose facts were edited
+is refused. Unselected findings remain available in the manifest.
+For a detected move, select the destination's `moved` observation; it checks
+and updates the old and new baseline entries together. The matching
+`move_source` observation cannot be applied on its own.
+
+To reconsider a restored file without rescanning its directory:
+
+```bash
+checksumtool -mode recheck -db ~/.local/share/checksumtool/checksums.json -manifest /var/tmp/recheck.json ~/Pictures/restored.jpg
+checksumtool -mode apply-observations -db ~/.local/share/checksumtool/checksums.json -manifest /var/tmp/recheck.json -select OBSERVATION_ID
+```
+
+Recheck manifests are deliberately marked partial and their root coverage is
+`targeted`. They can provide positive evidence for the selected file, but never
+prove that other paths are absent.
+
+To verify a selected copied batch without changing the baseline:
+
+```bash
+checksumtool -mode verify-manifest -manifest /var/tmp/checksum-observations.json -select OBSERVATION_ID /mnt/staging
+```
+
+The alternate root preserves paths relative to the manifest's recorded source
+root. Verify selected observations from multiple source roots in separate
+invocations. Results check content digests and sizes; they do not claim that
+the copy is a simultaneous snapshot of a changing source tree.
+
 `checksumtool -mode apply`
 
 Apply the findings of the last sync run to the database, without re-reading any files.
@@ -201,6 +258,12 @@ strict_moves = false
 ```
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
+
+## Changes in v3.3 (planned release)
+
+- **Stable reads and structured observations**: opt-in `sync -manifest` captures every completed observation, including clean files, source identity, root coverage and explicit errors. Unreadable or missing roots cannot create deletion decisions; completed positive evidence remains available from partial scans.
+- **Selective apply and targeted recheck**: `apply-observations` applies only selected observation IDs with per-entry baseline comparisons, exact byte rechecks, idempotent results and atomic move updates. Suspect content needs explicit acceptance; deletion needs complete root coverage and a still-matching source root. `recheck` revisits selected files without a full tree scan.
+- **Staging verification**: `verify-manifest` checks selected files in an alternate tree without changing the checksum database.
 
 ## Changes in v3.2
 

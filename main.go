@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,8 @@ import (
 )
 
 const clearLine = "\r\033[2K"
+
+var errUnstableRead = errors.New("file changed while it was being read")
 
 func isTerminal() bool {
 	fi, err := os.Stdout.Stat()
@@ -91,23 +94,78 @@ type WorkerResult struct {
 	Checksum uint64
 	Size     int64
 	ModTime  int64
+	Device   uint64
+	Inode    uint64
 	Exists   bool
 	Err      error
 }
 
 func calculateChecksum(filePath string) (uint64, error) {
+	checksum, _, err := calculateStableChecksum(filePath)
+	return checksum, err
+}
+
+func calculateStableChecksum(filePath string) (uint64, os.FileInfo, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return 0, nil, err
+	}
 
 	hash := xxhash.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
+	after, err := file.Stat()
+	if err != nil {
+		return 0, nil, err
+	}
+	pathAfter, err := os.Stat(filePath)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !sameFileSnapshot(before, after) || !sameFileSnapshot(after, pathAfter) {
+		return 0, nil, errUnstableRead
+	}
+	return hash.Sum64(), after, nil
+}
 
-	return hash.Sum64(), nil
+func sameFileSnapshot(a, b os.FileInfo) bool {
+	if !os.SameFile(a, b) || a.Size() != b.Size() || a.ModTime() != b.ModTime() || a.Mode() != b.Mode() {
+		return false
+	}
+	statA, okA := a.Sys().(*syscall.Stat_t)
+	statB, okB := b.Sys().(*syscall.Stat_t)
+	if okA && okB {
+		if statA.Dev != statB.Dev || statA.Ino != statB.Ino {
+			return false
+		}
+		secA, nsecA, ctimeA := statChangeTime(statA)
+		secB, nsecB, ctimeB := statChangeTime(statB)
+		return ctimeA == ctimeB && (!ctimeA || (secA == secB && nsecA == nsecB))
+	}
+	return true
+}
+
+func statChangeTime(stat *syscall.Stat_t) (int64, int64, bool) {
+	value := reflect.ValueOf(stat)
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	for _, name := range []string{"Ctim", "Ctimespec"} {
+		field := value.FieldByName(name)
+		if field.IsValid() && field.Kind() == reflect.Struct {
+			sec, nsec := field.FieldByName("Sec"), field.FieldByName("Nsec")
+			if sec.IsValid() && nsec.IsValid() && sec.CanInt() && nsec.CanInt() {
+				return sec.Int(), nsec.Int(), true
+			}
+		}
+	}
+	return 0, 0, false
 }
 
 func loadChecksumDB(dbFilePath string, verbose bool) (*ChecksumDB, error) {
@@ -583,6 +641,10 @@ func worker(jobs <-chan string, results chan<- WorkerResult, calculateChecksums 
 		info, err := os.Stat(filePath)
 		if err != nil {
 			result.Exists = false
+			_, lstatErr := os.Lstat(filePath)
+			if !os.IsNotExist(err) || lstatErr == nil || !os.IsNotExist(lstatErr) {
+				result.Err = err
+			}
 			results <- result
 			continue
 		}
@@ -590,13 +652,19 @@ func worker(jobs <-chan string, results chan<- WorkerResult, calculateChecksums 
 		result.ModTime = info.ModTime().UnixNano()
 
 		if calculateChecksums {
-			checksum, err := calculateChecksum(filePath)
+			checksum, stableInfo, err := calculateStableChecksum(filePath)
 			if err != nil {
 				result.Err = err
 				results <- result
 				continue
 			}
 			result.Checksum = checksum
+			result.Size = stableInfo.Size()
+			result.ModTime = stableInfo.ModTime().UnixNano()
+			if stat, ok := stableInfo.Sys().(*syscall.Stat_t); ok {
+				result.Device = uint64(stat.Dev)
+				result.Inode = stat.Ino
+			}
 		}
 
 		results <- result
@@ -615,6 +683,8 @@ type syncState struct {
 	unverifiable []ScanFile
 	disappeared  []string
 	discovered   []ScanFile
+	observations []FileObservation
+	scanID       string
 }
 
 // procOpts carries mode-specific behaviour that only some modes need.
@@ -643,6 +713,13 @@ func processResults(results <-chan WorkerResult, done chan<- struct{}, mode stri
 		atomic.AddUint64(processedFiles, 1)
 
 		if result.Err != nil {
+			if mode == "sync" {
+				category := "error"
+				if errors.Is(result.Err, errUnstableRead) {
+					category = "unstable"
+				}
+				opts.sync.observations = append(opts.sync.observations, observation(result, category, nil, opts.sync.scanID))
+			}
 			outputMu.Lock()
 			fmt.Printf("%sError processing file %s: %v\n", prefix, result.FilePath, result.Err)
 			outputMu.Unlock()
@@ -711,17 +788,20 @@ func processResults(results <-chan WorkerResult, done chan<- struct{}, mode stri
 				// vanished mid-run was never recorded in the first place.
 				if inDB {
 					state.disappeared = append(state.disappeared, result.FilePath)
+					state.observations = append(state.observations, observation(result, "deleted", &entry, state.scanID))
 				}
 				continue
 			}
 
 			if !inDB {
 				state.discovered = append(state.discovered, observedFile(result))
+				state.observations = append(state.observations, observation(result, "new", nil, state.scanID))
 				continue
 			}
 
 			if entry.Checksum == result.Checksum {
 				state.verified++
+				state.observations = append(state.observations, observation(result, "verified", &entry, state.scanID))
 				if !entry.MetadataKnown() || !entry.MetadataMatches(result.Size, result.ModTime) {
 					state.touched = append(state.touched, observedFile(result))
 				}
@@ -735,12 +815,15 @@ func processResults(results <-chan WorkerResult, done chan<- struct{}, mode stri
 			switch kind {
 			case mismatchCorrupt:
 				state.corrupt = append(state.corrupt, observedFile(result))
+				state.observations = append(state.observations, observation(result, "corrupt", &entry, state.scanID))
 				errorCount++
 			case mismatchUnverifiable:
 				state.unverifiable = append(state.unverifiable, observedFile(result))
+				state.observations = append(state.observations, observation(result, "unverifiable", &entry, state.scanID))
 				errorCount++
 			default:
 				state.modified = append(state.modified, observedFile(result))
+				state.observations = append(state.observations, observation(result, "modified", &entry, state.scanID))
 			}
 		case "list-missing":
 			outputMu.Lock()
@@ -1250,6 +1333,11 @@ Modes:
                   re-reading any file contents. Applies moved, new, modified and
                   metadata-only changes; deletions and corruption suspects need
                   -with-deleted / -with-corrupt.
+  apply-observations Apply selected identities from a -manifest; unrelated
+                  database changes do not invalidate selected entries.
+  recheck         Hash selected files and write a targeted observation manifest.
+  verify-manifest Verify selected observations against a copied tree without
+                  changing the checksum database.
   check           Verify database entries against the files on disk. Read-only.
                   Exits 1 on any mismatch, error or missing file. Directories are
                   optional and filter which entries are checked.
@@ -1282,6 +1370,8 @@ Exit codes: 0 on success, 1 on mismatches, errors, or missing files. A sync
 run also exits 1 on a changed or deleted file; moves and additions never fail.
 
 Flags:
+  -manifest <path>  sync: also write a versioned manifest of every completed
+                  observation. This is evidence only and does not change apply.
 `
 
 func main() {
@@ -1292,20 +1382,26 @@ func main() {
 	var numWorkers int
 	var configPath string
 	var scanReportPath string
+	var manifestPath string
+	var selectedObservations string
 	var applyNow bool
 	var withDeleted bool
 	var withCorrupt bool
+	var acceptSuspect bool
 	var strictMoves bool
 	var force bool
 	flag.StringVar(&dbFilePath, "db", defaultDBPath(), "Checksum database file location")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose output")
-	flag.StringVar(&mode, "mode", "", "Operation mode: sync, apply, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate")
+	flag.StringVar(&mode, "mode", "", "Operation mode: sync, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate")
 	flag.IntVar(&numWorkers, "workers", 4, "Number of worker goroutines")
 	flag.StringVar(&configPath, "config", defaultConfigPath(), "Config file location")
 	flag.StringVar(&scanReportPath, "scan-report", "", "Scan report location (default: alongside the database, as <db>.scan.json)")
+	flag.StringVar(&manifestPath, "manifest", "", "sync: write an observation manifest; apply-observations: read one")
+	flag.StringVar(&selectedObservations, "select", "", "apply-observations: comma-separated observation identities to apply")
 	flag.BoolVar(&applyNow, "apply", false, "sync: write the scan results to the database in the same run")
 	flag.BoolVar(&withDeleted, "with-deleted", false, "sync -apply / apply: also remove entries whose file is gone (skipped by default: an unmounted volume looks deleted)")
 	flag.BoolVar(&withCorrupt, "with-corrupt", false, "update, sync -apply / apply: also accept content changes that could not be told apart from corruption")
+	flag.BoolVar(&acceptSuspect, "accept-suspect", false, "apply-observations: explicitly accept selected modified, corrupt or unverifiable bytes")
 	flag.BoolVar(&listAll, "list-all", false, "sync: also list moved and new files, not just the findings that need attention")
 	flag.BoolVar(&strictMoves, "strict-moves", false, "Only treat a checksum group as a move when exactly one file vanished and one appeared")
 	flag.BoolVar(&force, "force", false, "apply: use the scan report even if it is partial or the database changed since the scan")
@@ -1356,13 +1452,22 @@ func main() {
 	}
 
 	if mode == "" {
-		fmt.Println("Please specify an operation mode using the -mode flag: sync, apply, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate")
+		fmt.Println("Please specify an operation mode using the -mode flag: sync, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate")
 		fmt.Println("Run 'checksumtool -help' for a description of each mode.")
 		os.Exit(1)
 	}
 
 	if scanReportPath == "" {
 		scanReportPath = defaultScanReportPath(dbFilePath)
+	}
+	if (mode == "sync" || mode == "recheck") && manifestPath != "" {
+		manifestAbs, _ := filepath.Abs(manifestPath)
+		reportAbs, _ := filepath.Abs(scanReportPath)
+		dbAbs, _ := filepath.Abs(dbFilePath)
+		if manifestAbs == dbAbs || (mode == "sync" && manifestAbs == reportAbs) {
+			fmt.Println("Error: observation manifest path must differ from the scan report and checksum database")
+			os.Exit(1)
+		}
 	}
 
 	walkRoots := resolveDirectories(mode, flag.Args(), cfg.Directories)
@@ -1374,7 +1479,7 @@ func main() {
 
 	// Acquire DB lock: exclusive for mutating modes, shared for read-only
 	mutating := mode == "update" || mode == "add-missing" || mode == "remove-deleted" ||
-		mode == "apply" || mode == "migrate" || (mode == "sync" && applyNow)
+		mode == "apply" || mode == "apply-observations" || mode == "migrate" || (mode == "sync" && applyNow)
 	lockFile, err := lockDBFile(dbFilePath, mutating)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -1403,6 +1508,105 @@ func main() {
 		}
 		return
 	}
+	if mode == "apply-observations" {
+		if manifestPath == "" || selectedObservations == "" {
+			fmt.Println("Error: apply-observations requires -manifest and -select")
+			os.Exit(1)
+		}
+		manifest, err := loadObservationManifest(manifestPath)
+		if err != nil {
+			fmt.Printf("Error reading observation manifest: %v\n", err)
+			os.Exit(1)
+		}
+		selected := make(map[string]bool)
+		for _, id := range strings.Split(selectedObservations, ",") {
+			id = strings.TrimSpace(id)
+			if id != "" {
+				selected[id] = true
+			}
+		}
+		if len(selected) == 0 {
+			fmt.Println("Error: -select contains no observation identities")
+			os.Exit(1)
+		}
+		results, changed, err := applyObservationManifest(checksumDB, manifest, selected, acceptSuspect, withDeleted)
+		if err != nil {
+			fmt.Printf("Error applying observations: %v\n", err)
+			os.Exit(1)
+		}
+		if changed {
+			if err := saveChecksumDB(dbFilePath, checksumDB, verbose); err != nil {
+				for i := range results {
+					if results[i].Status == "applied" {
+						results[i].Status = "failed"
+						results[i].Detail = "database write failed: " + err.Error()
+					}
+				}
+				encoded, _ := json.Marshal(results)
+				fmt.Println(string(encoded))
+				os.Exit(1)
+			}
+		}
+		encoded, _ := json.Marshal(results)
+		fmt.Println(string(encoded))
+		for _, result := range results {
+			if result.Status == "failed" || result.Status == "conflicted" {
+				os.Exit(1)
+			}
+		}
+		return
+	}
+	if mode == "recheck" {
+		if manifestPath == "" || len(flag.Args()) == 0 {
+			fmt.Println("Error: recheck requires -manifest and at least one file path")
+			os.Exit(1)
+		}
+		manifest, errorCount := buildTargetedManifest(flag.Args(), checksumDB)
+		if err := saveObservationManifest(manifestPath, manifest); err != nil {
+			fmt.Printf("Error writing observation manifest: %v\n", err)
+			os.Exit(1)
+		}
+		if errorCount > 0 {
+			fmt.Printf("%d targeted observation(s) need attention; see %s\n", errorCount, manifestPath)
+			os.Exit(1)
+		}
+		return
+	}
+	if mode == "verify-manifest" {
+		if manifestPath == "" || selectedObservations == "" || len(flag.Args()) != 1 {
+			fmt.Println("Error: verify-manifest requires -manifest, -select and one alternate root")
+			os.Exit(1)
+		}
+		manifest, err := loadObservationManifest(manifestPath)
+		if err != nil {
+			fmt.Printf("Error reading observation manifest: %v\n", err)
+			os.Exit(1)
+		}
+		selected := make(map[string]bool)
+		for _, id := range strings.Split(selectedObservations, ",") {
+			id = strings.TrimSpace(id)
+			if id != "" {
+				selected[id] = true
+			}
+		}
+		if len(selected) == 0 {
+			fmt.Println("Error: -select contains no observation identities")
+			os.Exit(1)
+		}
+		results, err := verifyObservationManifest(manifest, selected, flag.Args()[0])
+		if err != nil {
+			fmt.Printf("Error verifying manifest: %v\n", err)
+			os.Exit(1)
+		}
+		encoded, _ := json.Marshal(results)
+		fmt.Println(string(encoded))
+		for _, result := range results {
+			if result.Status != "verified" {
+				os.Exit(1)
+			}
+		}
+		return
+	}
 
 	if verbose {
 		fmt.Println("Comparing checksums with the database...")
@@ -1410,9 +1614,14 @@ func main() {
 
 	var filesToProcess []string
 	var calculateChecksums bool
+	var manifestCoverage []RootCoverage
 	if mode == "sync" {
 		calculateChecksums = true
-		filesToProcess, err = getSyncFiles(walkRoots, flag.Args(), checksumDB)
+		if manifestPath != "" {
+			filesToProcess, manifestCoverage, err = getSyncFilesForManifest(walkRoots, flag.Args(), checksumDB)
+		} else {
+			filesToProcess, err = getSyncFiles(walkRoots, flag.Args(), checksumDB)
+		}
 	} else {
 		filesToProcess, calculateChecksums, err = getFilesToProcess(mode, walkRoots, checksumDB)
 	}
@@ -1469,7 +1678,7 @@ func main() {
 
 	done := make(chan struct{})
 	var mismatchCount int
-	state := &syncState{}
+	state := &syncState{scanID: time.Now().UTC().Format("20060102T150405.000000000Z")}
 	go func() {
 		mismatchCount = processResults(results, done, mode, checksumDB, &processedFiles, &outputMu, prefix, procOpts{sync: state, withCorrupt: withCorrupt})
 	}()
@@ -1488,7 +1697,13 @@ func main() {
 	}
 
 	if mode == "sync" {
-		report := buildScanReport(state, checksumDB, dbFilePath, walkRoots, strictMoves, ctx.Err() != nil)
+		coverageIncomplete := false
+		for _, coverage := range manifestCoverage {
+			if coverage.Status != "complete" {
+				coverageIncomplete = true
+			}
+		}
+		report := buildScanReport(state, checksumDB, dbFilePath, walkRoots, strictMoves, ctx.Err() != nil || coverageIncomplete)
 		// A changed or deleted file is worth a non-zero exit even though it is
 		// not a read error, so an unattended run reports on its own.
 		concerning := mismatchCount > 0 || report.Concerning() > 0
@@ -1500,6 +1715,76 @@ func main() {
 		if err := saveScanReport(scanReportPath, report); err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
+		}
+		if manifestPath != "" {
+			manifest := newManifest(walkRoots)
+			manifest.Roots = nil
+			manifest.Coverage = append([]RootCoverage(nil), manifestCoverage...)
+			for _, coverage := range manifestCoverage {
+				manifest.Roots = append(manifest.Roots, coverage.Root)
+			}
+			manifest.ScanID = state.scanID
+			manifest.GeneratedAt = report.GeneratedAt
+			manifest.Partial = report.Partial
+			manifest.Observations = make([]FileObservation, 0, len(state.observations))
+			for _, item := range state.observations {
+				for _, coverage := range manifest.Coverage {
+					absRoot := coverage.Root
+					if item.Path == absRoot || isUnderDir(item.Path, absRoot) {
+						item.Root = absRoot
+						for _, coverage := range manifest.Coverage {
+							if coverage.Root == absRoot {
+								item.RootDevice, item.RootInode = coverage.Device, coverage.Inode
+								break
+							}
+						}
+						if item.Category == "deleted" && !coverageIsComplete(manifest, absRoot) {
+							item.Category = "unconfirmed_absence"
+							item.Error = "absence not confirmed because scan coverage is incomplete"
+						}
+						break
+					}
+				}
+				if item.Category == "new" {
+					for _, move := range report.Moved {
+						if item.Path == move.To {
+							item.Category = "moved"
+							item.OriginalPath = move.From
+							baseline := checksumDB.Checksums[move.From]
+							item.Baseline = &baseline
+							break
+						}
+					}
+				}
+				if item.Category == "deleted" {
+					for _, move := range report.Moved {
+						if item.Path == move.From {
+							item.Category = "move_source"
+							item.OriginalPath = move.From
+							item.CurrentPath = move.To
+							break
+						}
+					}
+				}
+				setObservationIdentity(&item)
+				manifest.Observations = append(manifest.Observations, item)
+			}
+			for i := range manifest.Coverage {
+				coverage := &manifest.Coverage[i]
+				for _, item := range manifest.Observations {
+					if item.Root == coverage.Root {
+						coverage.Completed++
+					}
+				}
+			}
+			if err := validateManifestVersion(manifest); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := saveObservationManifest(manifestPath, manifest); err != nil {
+				fmt.Printf("Error writing observation manifest: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		if !applyNow {
