@@ -259,7 +259,7 @@ strict_moves = false
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
 
-## Changes in v3.3 (planned release)
+## Changes in v3.3
 
 - **Stable reads and structured observations**: opt-in `sync -manifest` captures every completed observation, including clean files, source identity, root coverage and explicit errors. Unreadable or missing roots cannot create deletion decisions; completed positive evidence remains available from partial scans.
 - **Selective apply and targeted recheck**: `apply-observations` applies only selected observation IDs with per-entry baseline comparisons, exact byte rechecks, idempotent results and atomic move updates. Suspect content needs explicit acceptance; deletion needs complete root coverage and a still-matching source root. `recheck` revisits selected files without a full tree scan.
