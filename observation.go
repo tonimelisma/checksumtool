@@ -425,6 +425,7 @@ func applyObservationManifest(db *ChecksumDB, manifest *ObservationManifest, sel
 			delete(db.Checksums, item.OriginalPath)
 		}
 		db.Checksums[item.Path] = *item.Observed
+		db.markVerified(item.Path, time.Now().Unix())
 		result.Status, changed = "applied", true
 		results = append(results, result)
 	}

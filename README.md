@@ -12,6 +12,8 @@ My personal use case is to detect bit rot in any pictures. Throughout the years 
 - Detect moved files and relocate their database entry instead of reporting a deletion plus an addition
 - Scan once, review, then apply without re-reading a single file
 - Optional schema-versioned observation manifests for machine consumers
+- Quick daily syncs that read only new and changed files, with rolling verification that re-reads a fixed amount of unchanged data per run so every file is still checked regularly
+- Apply only chosen categories (for example additions and moves) and write per-category path lists for other tools
 - Update the checksum database with new or changed files
 - List files that are missing from the checksum database
 - Add checksums for missing files to the database
@@ -30,7 +32,7 @@ checksumtool [flags] [directories...]
 - `-db string`: Checksum database file location (default `$HOME/.local/share/checksumtool/checksums.json`)
 - `-config string`: Config file location (default `$HOME/.config/checksumtool/config.toml`)
 - `-verbose`: Enable verbose output. Suppressed when stdout is not a terminal, so an unattended run does not mail its progress chatter
-- `-mode string`: Operation mode: sync, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate
+- `-mode string`: Operation mode: sync, status, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate
 - `-workers int`: Number of worker goroutines (default 4)
 - `-scan-report string`: Scan report location (default: alongside the database, as `<db>.scan.json`)
 - `-manifest string`: With `sync` or `recheck`, write a versioned observation manifest; with `apply-observations` or `verify-manifest`, read one.
@@ -42,6 +44,11 @@ checksumtool [flags] [directories...]
 - `-list-all`: With `sync`, also list moved and new files, not just the findings that need attention
 - `-strict-moves`: Only treat a checksum group as a move when exactly one file vanished and one appeared
 - `-force`: With `apply`, use the scan report even if it is partial or the database changed since the scan
+- `-quick`: With `sync`, read only new files, entries whose file is gone and entries whose size or timestamp changed. Unchanged files are not read, so a quick run alone cannot detect bit rot
+- `-verify-budget size`: With `sync -quick`, also re-read the unchanged files verified longest ago, up to this many bytes (`K`, `M`, `G`, `T`, 1024-based). Also settable as `verify_budget` in the config
+- `-apply-categories list`: With `sync -apply` or `apply`, apply only these categories: `metadata`, `modified`, `moved`, `new`, `corrupt`, `unverifiable`, `deleted`. Corrupt, unverifiable and deleted still also need `-with-corrupt` / `-with-deleted`
+- `-list-paths cat=file[,cat=file...]`: With `sync`, write each category's paths to a file, one per line. Categories: `new`, `moved` (new locations), `move_source` (old locations), `modified`, `corrupt`, `unverifiable`, `deleted`, `metadata`. A path containing a line break is not listed and is reported as an error
+- `-relative-to dir`: With `-list-paths`, write paths relative to this directory
 
 ### Operation Modes
 - `sync`: One pass over everything. Verifies database entries, walks the directories for files not yet recorded, and classifies each file as verified, modified, corrupt, moved, new or deleted. Lists only the findings that need a decision — changed, corrupt, unverifiable and deleted files — while moves and additions are summarized as counts unless `-list-all` is given. Reports only and writes a scan report; add `-apply` to write the results in the same run. Requires at least one directory (from arguments or the config file). Exits with code 1 if any concerning finding is present or a file could not be read.
@@ -55,6 +62,7 @@ checksumtool [flags] [directories...]
 - `add-missing`: Add checksums for missing files to the database. Requires at least one directory.
 - `remove-deleted`: Remove files from the database that no longer exist on disk. Directories are optional.
 - `list-deleted`: List files in the database that no longer exist on disk. Directories are optional.
+- `status`: Summarize the database: entry count, recorded size, oldest and median time since files were last verified, and any unapplied scan report. Read-only.
 - `migrate`: One-time conversion of a legacy database to the current entry format. See [Database format](#database-format).
 
 ### Telling corruption apart from an edit
@@ -243,6 +251,8 @@ Each entry stores a checksum plus the size and modification time observed when t
 
 Size and timestamp may be absent, which means "unknown" and suppresses metadata-based inference for that entry. They are filled in by the first run that re-reads the file and confirms its checksum still matches.
 
+Since v3.4 the database may also carry a top-level `"verified"` map of path to the Unix time its content was last read and matched. It drives rolling verification and is kept separate from the entries, so recording a read never makes an entry look changed. Older versions ignore it (and drop it when they rewrite the database, which only means those files count as never verified).
+
 ## Config File
 
 checksumtool supports an optional TOML config file at `~/.config/checksumtool/config.toml` (override with `-config`). All fields are optional:
@@ -255,9 +265,24 @@ directories = [
 workers = 8
 verbose = true
 strict_moves = false
+verify_budget = "115G"   # used by sync -quick
 ```
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
+
+## Changes in v3.4
+
+- **Quick sync and rolling verification**: `sync -quick` reads only new and changed files; `-verify-budget` adds a fixed amount of the least recently verified unchanged data per run. A daily `sync -quick -verify-budget <total/N> -apply` checks what changed every day and re-reads every file about every N days, without a long full pass. Verification times are recorded per path and survive interruption.
+- **Selective application and path lists**: `-apply-categories` lets an unattended run record, say, additions and moves while leaving every content change and deletion for review. `-list-paths` writes per-category path lists for `rsync --files-from`, `tar -T` and similar tools.
+- **`status` mode** and path-ordered reading (files are hashed in sorted path order, keeping each directory's reads together).
+
+Example daily run, recording additions and moves and handing the day's new files to another tool:
+
+```bash
+checksumtool -mode sync -quick -verify-budget 100G -apply -apply-categories new,moved,metadata \
+  -list-paths new=/tmp/new.txt,moved=/tmp/moved.txt -relative-to /home/user/photos /home/user/photos
+rsync -a --files-from=/tmp/new.txt /home/user/photos/ /mnt/copy/
+```
 
 ## Changes in v3.3
 

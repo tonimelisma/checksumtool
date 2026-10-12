@@ -86,7 +86,11 @@ func (e FileEntry) MetadataMatches(size, modTime int64) bool {
 
 type ChecksumDB struct {
 	Checksums map[string]FileEntry `json:"checksums"`
-	mutex     sync.Mutex
+	// Verified records, per path, the Unix time the file's content was last
+	// read and found to match. It drives rolling verification (-verify-budget).
+	// Older versions ignore it; a path without a time counts as never verified.
+	Verified map[string]int64 `json:"verified,omitempty"`
+	mutex    sync.Mutex
 }
 
 type WorkerResult struct {
@@ -289,6 +293,7 @@ func saveChecksumDB(dbFilePath string, checksumDB *ChecksumDB, verbose bool) err
 	}
 
 	checksumDB.mutex.Lock()
+	checksumDB.pruneVerified()
 	dbData, err := json.MarshalIndent(checksumDB, "", "  ")
 	checksumDB.mutex.Unlock()
 	if err != nil {
@@ -676,15 +681,16 @@ func worker(jobs <-chan string, results chan<- WorkerResult, calculateChecksums 
 // distinguished from a moved one until the walk has finished — so sync is the
 // one mode that defers its decisions instead of acting per result.
 type syncState struct {
-	verified     int
-	touched      []ScanFile
-	modified     []ScanFile
-	corrupt      []ScanFile
-	unverifiable []ScanFile
-	disappeared  []string
-	discovered   []ScanFile
-	observations []FileObservation
-	scanID       string
+	verified      int
+	verifiedFiles []ScanFile
+	touched       []ScanFile
+	modified      []ScanFile
+	corrupt       []ScanFile
+	unverifiable  []ScanFile
+	disappeared   []string
+	discovered    []ScanFile
+	observations  []FileObservation
+	scanID        string
 }
 
 // procOpts carries mode-specific behaviour that only some modes need.
@@ -752,11 +758,12 @@ func processResults(results <-chan WorkerResult, done chan<- struct{}, mode stri
 			if ok && entry.Checksum == result.Checksum {
 				// Content is intact. Refresh drifted or missing metadata so a
 				// later corruption check compares against a current timestamp.
+				checksumDB.mutex.Lock()
 				if !entry.MetadataKnown() || !entry.MetadataMatches(result.Size, result.ModTime) {
-					checksumDB.mutex.Lock()
 					checksumDB.Checksums[result.FilePath] = FileEntry{Checksum: entry.Checksum, Size: result.Size, ModTime: result.ModTime}
-					checksumDB.mutex.Unlock()
 				}
+				checksumDB.markVerified(result.FilePath, time.Now().Unix())
+				checksumDB.mutex.Unlock()
 				continue
 			}
 
@@ -778,6 +785,7 @@ func processResults(results <-chan WorkerResult, done chan<- struct{}, mode stri
 			outputMu.Unlock()
 			checksumDB.mutex.Lock()
 			checksumDB.Checksums[result.FilePath] = FileEntry{Checksum: result.Checksum, Size: result.Size, ModTime: result.ModTime}
+			checksumDB.markVerified(result.FilePath, time.Now().Unix())
 			checksumDB.mutex.Unlock()
 		case "sync":
 			state := opts.sync
@@ -801,6 +809,7 @@ func processResults(results <-chan WorkerResult, done chan<- struct{}, mode stri
 
 			if entry.Checksum == result.Checksum {
 				state.verified++
+				state.verifiedFiles = append(state.verifiedFiles, observedFile(result))
 				state.observations = append(state.observations, observation(result, "verified", &entry, state.scanID))
 				if !entry.MetadataKnown() || !entry.MetadataMatches(result.Size, result.ModTime) {
 					state.touched = append(state.touched, observedFile(result))
@@ -837,6 +846,7 @@ func processResults(results <-chan WorkerResult, done chan<- struct{}, mode stri
 			} else if _, ok := checksumDB.Checksums[result.FilePath]; !ok {
 				checksumDB.mutex.Lock()
 				checksumDB.Checksums[result.FilePath] = FileEntry{Checksum: result.Checksum, Size: result.Size, ModTime: result.ModTime}
+				checksumDB.markVerified(result.FilePath, time.Now().Unix())
 				checksumDB.mutex.Unlock()
 			}
 		case "remove-deleted":
@@ -1013,6 +1023,8 @@ type ScanReport struct {
 	Partial      bool       `json:"partial"`
 	Roots        []string   `json:"roots,omitempty"`
 	Verified     int        `json:"verified"`
+	Quick        bool       `json:"quick,omitempty"`
+	Unread       int        `json:"unread,omitempty"`
 	Ambiguous    int        `json:"ambiguous,omitempty"`
 	Touched      []ScanFile `json:"touched,omitempty"`
 	Modified     []ScanFile `json:"modified,omitempty"`
@@ -1114,6 +1126,13 @@ func verifyScanReport(report *ScanReport, dbFilePath string, force bool) error {
 type applyOpts struct {
 	withDeleted bool
 	withCorrupt bool
+	// categories, when set, limits apply to the named categories. Corrupt,
+	// unverifiable and deleted additionally still need their own flags.
+	categories map[string]bool
+}
+
+func (o applyOpts) allows(category string) bool {
+	return o.categories == nil || o.categories[category]
 }
 
 type applyStats struct {
@@ -1141,8 +1160,11 @@ func currentMetadataMatches(path string, size, modTime int64) bool {
 func applyScanReport(checksumDB *ChecksumDB, report *ScanReport, opts applyOpts) applyStats {
 	stats := applyStats{}
 
+	// Every applied entry was read during the scan, so the scan time is its
+	// verification time.
 	setEntry := func(file ScanFile) {
 		checksumDB.Checksums[file.Path] = FileEntry{Checksum: file.Checksum, Size: file.Size, ModTime: file.ModTime}
+		checksumDB.markVerified(file.Path, report.GeneratedAt)
 	}
 
 	stale := func(path string) {
@@ -1152,6 +1174,9 @@ func applyScanReport(checksumDB *ChecksumDB, report *ScanReport, opts applyOpts)
 
 	// Content verified; only the recorded metadata was missing or stale.
 	for _, file := range report.Touched {
+		if !opts.allows("metadata") {
+			break
+		}
 		entry, ok := checksumDB.Checksums[file.Path]
 		if !ok || entry.Checksum != file.Checksum {
 			stale(file.Path)
@@ -1166,6 +1191,9 @@ func applyScanReport(checksumDB *ChecksumDB, report *ScanReport, opts applyOpts)
 	}
 
 	for _, file := range report.Modified {
+		if !opts.allows("modified") {
+			break
+		}
 		if !currentMetadataMatches(file.Path, file.Size, file.ModTime) {
 			stale(file.Path)
 			continue
@@ -1175,6 +1203,9 @@ func applyScanReport(checksumDB *ChecksumDB, report *ScanReport, opts applyOpts)
 	}
 
 	for _, move := range report.Moved {
+		if !opts.allows("moved") {
+			break
+		}
 		if _, ok := checksumDB.Checksums[move.From]; !ok {
 			continue
 		}
@@ -1193,6 +1224,9 @@ func applyScanReport(checksumDB *ChecksumDB, report *ScanReport, opts applyOpts)
 	}
 
 	for _, file := range report.New {
+		if !opts.allows("new") {
+			break
+		}
 		if _, ok := checksumDB.Checksums[file.Path]; ok {
 			continue
 		}
@@ -1205,7 +1239,14 @@ func applyScanReport(checksumDB *ChecksumDB, report *ScanReport, opts applyOpts)
 	}
 
 	if opts.withCorrupt {
-		for _, file := range append(append([]ScanFile(nil), report.Corrupt...), report.Unverifiable...) {
+		var suspects []ScanFile
+		if opts.allows("corrupt") {
+			suspects = append(suspects, report.Corrupt...)
+		}
+		if opts.allows("unverifiable") {
+			suspects = append(suspects, report.Unverifiable...)
+		}
+		for _, file := range suspects {
 			if !currentMetadataMatches(file.Path, file.Size, file.ModTime) {
 				stale(file.Path)
 				continue
@@ -1215,7 +1256,7 @@ func applyScanReport(checksumDB *ChecksumDB, report *ScanReport, opts applyOpts)
 		}
 	}
 
-	if opts.withDeleted {
+	if opts.withDeleted && opts.allows("deleted") {
 		for _, path := range report.Deleted {
 			// An unmounted volume makes every file under it look deleted, so a
 			// path that is readable again is never removed.
@@ -1259,10 +1300,11 @@ func updateProgressBar(done <-chan struct{}, totalFiles int, processedFiles *uin
 }
 
 type Config struct {
-	Directories []string `toml:"directories"`
-	Workers     int      `toml:"workers"`
-	Verbose     bool     `toml:"verbose"`
-	StrictMoves bool     `toml:"strict_moves"`
+	Directories  []string `toml:"directories"`
+	Workers      int      `toml:"workers"`
+	Verbose      bool     `toml:"verbose"`
+	StrictMoves  bool     `toml:"strict_moves"`
+	VerifyBudget string   `toml:"verify_budget"`
 }
 
 // resolveDirectories returns the directories to walk. Config directories only
@@ -1347,6 +1389,8 @@ Modes:
   add-missing     Add files under the given directories to the database.
   list-deleted    List database entries whose file no longer exists.
   remove-deleted  Remove database entries whose file no longer exists.
+  status          Summarize the database: entry count, how long ago files were
+                  last verified, and any unapplied scan report. Read-only.
   migrate         One-time conversion of a legacy database (bare checksum
                   numbers) to the current entry format. Size and timestamp are
                   left empty and get filled in by the first run that re-reads
@@ -1366,12 +1410,32 @@ discovered files with the same checksum, and are only applied when both sides of
 a checksum group have equal counts (-strict-moves narrows this to one-to-one).
 A move can never mask corruption, because matching requires the hash to match.
 
+Quick sync and rolling verification:
+  sync -quick reads only new files, entries whose file is gone, and entries
+  whose size or timestamp changed. Unchanged files are not read, so a quick
+  run alone cannot detect bit rot. Add -verify-budget SIZE (or verify_budget in
+  the config) to also re-read the unchanged files verified longest ago, up to
+  SIZE bytes per run: run daily with a budget of about total size / N and every
+  file is re-read roughly every N days. Verification times are recorded only
+  when results are written (-apply), so use both together for rotation.
+
 Exit codes: 0 on success, 1 on mismatches, errors, or missing files. A sync
 run also exits 1 on a changed or deleted file; moves and additions never fail.
 
 Flags:
   -manifest <path>  sync: also write a versioned manifest of every completed
                   observation. This is evidence only and does not change apply.
+  -apply-categories LIST  sync -apply / apply: apply only these categories
+                  (metadata, modified, moved, new, corrupt, unverifiable,
+                  deleted). For example "new,moved,metadata" records additions
+                  and moves while leaving every content change for review.
+  -list-paths CAT=FILE[,CAT=FILE...]  sync: write the paths in each category
+                  (new, moved, move_source, modified, corrupt, unverifiable,
+                  deleted, metadata) to FILE, one per line, for other tools such
+                  as rsync --files-from. "moved" lists new locations and
+                  "move_source" the old ones. -relative-to DIR makes them
+                  relative. A path containing a line break is not listed and is
+                  reported as an error.
 `
 
 func main() {
@@ -1390,9 +1454,14 @@ func main() {
 	var acceptSuspect bool
 	var strictMoves bool
 	var force bool
+	var quick bool
+	var verifyBudgetText string
+	var applyCategoriesText string
+	var listPathsText string
+	var relativeTo string
 	flag.StringVar(&dbFilePath, "db", defaultDBPath(), "Checksum database file location")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose output")
-	flag.StringVar(&mode, "mode", "", "Operation mode: sync, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate")
+	flag.StringVar(&mode, "mode", "", "Operation mode: sync, status, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate")
 	flag.IntVar(&numWorkers, "workers", 4, "Number of worker goroutines")
 	flag.StringVar(&configPath, "config", defaultConfigPath(), "Config file location")
 	flag.StringVar(&scanReportPath, "scan-report", "", "Scan report location (default: alongside the database, as <db>.scan.json)")
@@ -1404,6 +1473,11 @@ func main() {
 	flag.BoolVar(&acceptSuspect, "accept-suspect", false, "apply-observations: explicitly accept selected modified, corrupt or unverifiable bytes")
 	flag.BoolVar(&listAll, "list-all", false, "sync: also list moved and new files, not just the findings that need attention")
 	flag.BoolVar(&strictMoves, "strict-moves", false, "Only treat a checksum group as a move when exactly one file vanished and one appeared")
+	flag.BoolVar(&quick, "quick", false, "sync: read only new and changed files instead of every recorded file")
+	flag.StringVar(&verifyBudgetText, "verify-budget", "", "sync -quick: also re-read the least recently verified unchanged files, up to this many bytes (e.g. 115G)")
+	flag.StringVar(&applyCategoriesText, "apply-categories", "", "sync -apply / apply: comma-separated categories to apply (default: all the other flags allow)")
+	flag.StringVar(&listPathsText, "list-paths", "", "sync: write paths per category, as category=file[,category=file...]")
+	flag.StringVar(&relativeTo, "relative-to", "", "sync -list-paths: write paths relative to this directory")
 	flag.BoolVar(&force, "force", false, "apply: use the scan report even if it is partial or the database changed since the scan")
 	flag.Usage = func() {
 		fmt.Fprint(flag.CommandLine.Output(), usageText)
@@ -1444,6 +1518,36 @@ func main() {
 	}
 	if !explicitFlags["strict-moves"] {
 		strictMoves = cfg.StrictMoves
+	}
+
+	if !explicitFlags["verify-budget"] {
+		verifyBudgetText = cfg.VerifyBudget
+	}
+	var verifyBudget int64
+	if verifyBudgetText != "" {
+		verifyBudget, err = parseByteSize(verifyBudgetText)
+		if err != nil {
+			fmt.Printf("Error: -verify-budget: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if explicitFlags["verify-budget"] && !quick {
+		fmt.Println("Error: -verify-budget only applies to sync -quick; a full sync already reads every file")
+		os.Exit(1)
+	}
+	applyCategories, err := parseApplyCategories(applyCategoriesText)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	pathLists, err := parseListPaths(listPathsText)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if (quick || pathLists != nil) && mode != "sync" {
+		fmt.Println("Error: -quick and -list-paths only apply to sync")
+		os.Exit(1)
 	}
 
 	if numWorkers <= 0 {
@@ -1501,8 +1605,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if mode == "status" {
+		printStatus(checksumDB, scanReportPath, time.Now())
+		return
+	}
 	if mode == "apply" {
-		if err := runApply(dbFilePath, scanReportPath, checksumDB, applyOpts{withDeleted: withDeleted, withCorrupt: withCorrupt}, force, verbose); err != nil {
+		if err := runApply(dbFilePath, scanReportPath, checksumDB, applyOpts{withDeleted: withDeleted, withCorrupt: withCorrupt, categories: applyCategories}, force, verbose); err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1629,6 +1737,13 @@ func main() {
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
+	unread := 0
+	if mode == "sync" && quick {
+		filesToProcess, unread = quickSelect(filesToProcess, checksumDB, verifyBudget)
+	}
+	// Reading in path order keeps a directory's files together, which is far
+	// kinder to spinning disks than the map's random order.
+	sort.Strings(filesToProcess)
 
 	totalFiles := len(filesToProcess)
 	var processedFiles uint64
@@ -1704,6 +1819,15 @@ func main() {
 			}
 		}
 		report := buildScanReport(state, checksumDB, dbFilePath, walkRoots, strictMoves, ctx.Err() != nil || coverageIncomplete)
+		report.Quick, report.Unread = quick, unread
+		listErrors := 0
+		if pathLists != nil {
+			for _, listErr := range writePathLists(report, pathLists, relativeTo) {
+				fmt.Printf("Error: %v\n", listErr)
+				listErrors++
+			}
+		}
+		mismatchCount += listErrors
 		// A changed or deleted file is worth a non-zero exit even though it is
 		// not a read error, so an unattended run reports on its own.
 		concerning := mismatchCount > 0 || report.Concerning() > 0
@@ -1797,7 +1921,14 @@ func main() {
 			return
 		}
 
-		stats := applyScanReport(checksumDB, report, applyOpts{withDeleted: withDeleted, withCorrupt: withCorrupt})
+		stats := applyScanReport(checksumDB, report, applyOpts{withDeleted: withDeleted, withCorrupt: withCorrupt, categories: applyCategories})
+		// Files that read back intact were verified by this run, interrupted
+		// or not, so their progress is kept for rolling verification.
+		for _, file := range state.verifiedFiles {
+			if entry, ok := checksumDB.Checksums[file.Path]; ok && entry.Checksum == file.Checksum {
+				checksumDB.markVerified(file.Path, report.GeneratedAt)
+			}
+		}
 		if !silent {
 			printApplyStats(stats)
 		}
@@ -1891,6 +2022,9 @@ func printScanSummary(report *ScanReport, listAll, silent bool) {
 
 	fmt.Println("\nScan summary:")
 	fmt.Printf("  verified:     %d\n", report.Verified)
+	if report.Quick {
+		fmt.Printf("  not re-read:  %d (quick run; unchanged size and timestamp)\n", report.Unread)
+	}
 	fmt.Printf("  metadata:     %d\n", len(report.Touched))
 	fmt.Printf("  modified:     %d\n", len(report.Modified))
 	fmt.Printf("  CORRUPT:      %d\n", len(report.Corrupt))
