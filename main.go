@@ -120,10 +120,12 @@ func calculateStableChecksum(filePath string) (uint64, os.FileInfo, error) {
 		return 0, nil, err
 	}
 
+	adviseSequential(file)
 	hash := xxhash.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return 0, nil, err
 	}
+	adviseDone(file)
 	after, err := file.Stat()
 	if err != nil {
 		return 0, nil, err

@@ -56,7 +56,7 @@ Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by
 
 **Selective categories and path lists**: `applyOpts.categories` gates each block of `applyScanReport()`; corrupt, unverifiable and deleted additionally still need their flags. `writePathLists()` writes sorted per-category paths (moves split into `moved` destinations and `move_source` origins), optionally relative to `-relative-to`; a path containing a line break, or one outside the base, is reported and left out, never mangled. These are generic tool interfaces — keep backup- or host-specific policy out of them.
 
-**Read order**: the job list is sorted by path before hashing so a directory's files are read together instead of in map order.
+**Read order and cache use**: the job list is sorted by path before hashing so a directory's files are read together instead of in map order. On Linux, `calculateStableChecksum()` advises `POSIX_FADV_SEQUENTIAL` before reading and `POSIX_FADV_DONTNEED` after hashing (`fadvise_linux.go`; no-ops elsewhere in `fadvise_other.go`). Every file is read once per scan, so caching it would only evict other programs' pages. The advice is best effort and never changes results.
 
 **Config file**: Optional TOML config at `~/.config/checksumtool/config.toml` (override with `-config` flag). Supports `directories`, `workers`, `verbose`, `strict_moves` and `verify_budget` fields. CLI flags always override config values; `flag.Visit()` detects explicitly-set flags. Config `directories` seed `list-missing`, `add-missing` and `sync` when no CLI directories are given, while DB-based modes only filter when directories are explicitly passed on the command line. Missing config file is silently ignored.
 

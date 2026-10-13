@@ -270,6 +270,10 @@ verify_budget = "115G"   # used by sync -quick
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
 
+## Changes in v3.4.1
+
+- **Gentler reads on Linux**: each file is read with a sequential-access hint, and its pages are released from the page cache once hashed. A scan reads every file exactly once, so it no longer pushes other programs' data out of memory. No flags or defaults changed.
+
 ## Changes in v3.4
 
 - **Quick sync and rolling verification**: `sync -quick` reads only new and changed files; `-verify-budget` adds a fixed amount of the least recently verified unchanged data per run. A daily `sync -quick -verify-budget <total/N> -apply` checks what changed every day and re-reads every file about every N days, without a long full pass. Verification times are recorded per path and survive interruption.
