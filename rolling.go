@@ -64,6 +64,41 @@ func parseByteSize(text string) (int64, error) {
 	return int64(value * float64(multiplier)), nil
 }
 
+// verifyBudget is a per-run re-read allowance: a fixed byte count, or a
+// fraction of the recorded data so the verification cycle stays the same
+// length as the data grows.
+type verifyBudget struct {
+	bytes    int64
+	fraction float64
+}
+
+// parseVerifyBudget accepts a size (see parseByteSize) or a percentage such as
+// "3.4%", meaning that share of the bytes recorded for the files in scope.
+func parseVerifyBudget(text string) (verifyBudget, error) {
+	s := strings.TrimSpace(text)
+	if strings.HasSuffix(s, "%") {
+		pct, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(s, "%")), 64)
+		if err != nil || pct < 0 || pct > 100 {
+			return verifyBudget{}, fmt.Errorf("invalid percentage %q (want 0-100%%)", text)
+		}
+		return verifyBudget{fraction: pct / 100}, nil
+	}
+	n, err := parseByteSize(s)
+	return verifyBudget{bytes: n}, err
+}
+
+// resolve turns the budget into bytes for this run's recorded files.
+func (b verifyBudget) resolve(paths []string, db *ChecksumDB) int64 {
+	if b.fraction == 0 {
+		return b.bytes
+	}
+	var total int64
+	for _, path := range paths {
+		total += db.Checksums[path].Size
+	}
+	return int64(b.fraction * float64(total))
+}
+
 // quickSelect narrows a sync's database entries to the ones a quick run must
 // read: entries whose file is gone or whose size or timestamp changed, entries
 // with no recorded metadata, and -- up to budget bytes -- the unchanged entries

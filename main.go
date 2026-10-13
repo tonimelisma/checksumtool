@@ -1417,8 +1417,9 @@ Quick sync and rolling verification:
   whose size or timestamp changed. Unchanged files are not read, so a quick
   run alone cannot detect bit rot. Add -verify-budget SIZE (or verify_budget in
   the config) to also re-read the unchanged files verified longest ago, up to
-  SIZE bytes per run: run daily with a budget of about total size / N and every
-  file is re-read roughly every N days. Verification times are recorded only
+  SIZE bytes per run. A percentage such as 3.4% is that share of the recorded
+  data, so a daily run re-reads every file about every 100/3.4 = 29 days and
+  the cycle does not lengthen as the data grows. Verification times are recorded only
   when results are written (-apply), so use both together for rotation.
 
 Exit codes: 0 on success, 1 on mismatches, errors, or missing files. A sync
@@ -1476,7 +1477,7 @@ func main() {
 	flag.BoolVar(&listAll, "list-all", false, "sync: also list moved and new files, not just the findings that need attention")
 	flag.BoolVar(&strictMoves, "strict-moves", false, "Only treat a checksum group as a move when exactly one file vanished and one appeared")
 	flag.BoolVar(&quick, "quick", false, "sync: read only new and changed files instead of every recorded file")
-	flag.StringVar(&verifyBudgetText, "verify-budget", "", "sync -quick: also re-read the least recently verified unchanged files, up to this many bytes (e.g. 115G)")
+	flag.StringVar(&verifyBudgetText, "verify-budget", "", "sync -quick: also re-read the least recently verified unchanged files, up to this many bytes (e.g. 115G) or this share of the recorded data (e.g. 3.4%)")
 	flag.StringVar(&applyCategoriesText, "apply-categories", "", "sync -apply / apply: comma-separated categories to apply (default: all the other flags allow)")
 	flag.StringVar(&listPathsText, "list-paths", "", "sync: write paths per category, as category=file[,category=file...]")
 	flag.StringVar(&relativeTo, "relative-to", "", "sync -list-paths: write paths relative to this directory")
@@ -1525,9 +1526,9 @@ func main() {
 	if !explicitFlags["verify-budget"] {
 		verifyBudgetText = cfg.VerifyBudget
 	}
-	var verifyBudget int64
+	var budget verifyBudget
 	if verifyBudgetText != "" {
-		verifyBudget, err = parseByteSize(verifyBudgetText)
+		budget, err = parseVerifyBudget(verifyBudgetText)
 		if err != nil {
 			fmt.Printf("Error: -verify-budget: %v\n", err)
 			os.Exit(1)
@@ -1741,7 +1742,7 @@ func main() {
 	}
 	unread := 0
 	if mode == "sync" && quick {
-		filesToProcess, unread = quickSelect(filesToProcess, checksumDB, verifyBudget)
+		filesToProcess, unread = quickSelect(filesToProcess, checksumDB, budget.resolve(filesToProcess, checksumDB))
 	}
 	// Reading in path order keeps a directory's files together, which is far
 	// kinder to spinning disks than the map's random order.

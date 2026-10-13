@@ -26,6 +26,27 @@ func TestParseByteSize(t *testing.T) {
 	}
 }
 
+func TestPercentVerifyBudget(t *testing.T) {
+	db := &ChecksumDB{Checksums: map[string]FileEntry{"/a": {Size: 600}, "/b": {Size: 400}, "/c": {Size: 1000}}}
+	paths := []string{"/a", "/b"}
+	b, err := parseVerifyBudget("10%")
+	if err != nil || b.resolve(paths, db) != 100 {
+		t.Fatalf("10%% of 1000 in-scope bytes = %d, %v; want 100", b.resolve(paths, db), err)
+	}
+	db.Checksums["/d"] = FileEntry{Size: 1000}
+	if got := b.resolve(append(paths, "/d"), db); got != 200 {
+		t.Fatalf("budget did not grow with the data: %d", got)
+	}
+	if b, _ := parseVerifyBudget("2G"); b.resolve(paths, db) != 2<<30 {
+		t.Fatal("byte budgets must stay fixed")
+	}
+	for _, bad := range []string{"%", "x%", "-1%", "101%"} {
+		if _, err := parseVerifyBudget(bad); err == nil {
+			t.Errorf("parseVerifyBudget(%q) accepted invalid input", bad)
+		}
+	}
+}
+
 func TestQuickSelectRotatesByVerificationAge(t *testing.T) {
 	dir := t.TempDir()
 	db := &ChecksumDB{Checksums: map[string]FileEntry{}}

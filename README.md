@@ -45,7 +45,7 @@ checksumtool [flags] [directories...]
 - `-strict-moves`: Only treat a checksum group as a move when exactly one file vanished and one appeared
 - `-force`: With `apply`, use the scan report even if it is partial or the database changed since the scan
 - `-quick`: With `sync`, read only new files, entries whose file is gone and entries whose size or timestamp changed. Unchanged files are not read, so a quick run alone cannot detect bit rot
-- `-verify-budget size`: With `sync -quick`, also re-read the unchanged files verified longest ago, up to this many bytes (`K`, `M`, `G`, `T`, 1024-based). Also settable as `verify_budget` in the config
+- `-verify-budget size|percent`: With `sync -quick`, also re-read the unchanged files verified longest ago, up to this many bytes (`K`, `M`, `G`, `T`, 1024-based), or a percentage of the recorded data such as `3.4%`. A percentage keeps the cycle length fixed as the data grows: daily runs at `P%` re-read every file about every `100/P` days. Also settable as `verify_budget` in the config
 - `-apply-categories list`: With `sync -apply` or `apply`, apply only these categories: `metadata`, `modified`, `moved`, `new`, `corrupt`, `unverifiable`, `deleted`. Corrupt, unverifiable and deleted still also need `-with-corrupt` / `-with-deleted`
 - `-list-paths cat=file[,cat=file...]`: With `sync`, write each category's paths to a file, one per line. Categories: `new`, `moved` (new locations), `move_source` (old locations), `modified`, `corrupt`, `unverifiable`, `deleted`, `metadata`. A path containing a line break is not listed and is reported as an error
 - `-relative-to dir`: With `-list-paths`, write paths relative to this directory
@@ -269,6 +269,10 @@ verify_budget = "115G"   # used by sync -quick
 ```
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
+
+## Changes in v3.5
+
+- **Percentage verify budgets**: `-verify-budget 3.4%` re-reads that share of the recorded data each run, computed from the files in scope every time, so the verification cycle stays about 29 days as the archive grows instead of lengthening under a fixed byte budget.
 
 ## Changes in v3.4.1
 
