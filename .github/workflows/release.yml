@@ -1,0 +1,211 @@
+# Publishes a GitHub Release for every commit that lands on main and passes CI.
+#
+# This is the only workflow that creates tags, releases or attestations. The
+# owner's server installs a release only if its binary carries a provenance
+# attestation signed by this file running on refs/heads/main, so nothing here
+# may run from another branch, and nothing triggers on tag pushes.
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, vX.Y.Z (empty: bump the patch of the highest tag)"
+        required: false
+        default: ""
+
+permissions: {}
+
+# One release at a time, so two runs can never claim the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Refuse anything but main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Releases are published only from refs/heads/main, not $REF"
+            exit 1
+          fi
+
+      - name: Choose the commit
+        id: commit
+        env:
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          MAIN_SHA: ${{ github.sha }}
+        run: |
+          # The commit CI tested, or main's head for a dispatch.
+          sha="${RUN_SHA:-$MAIN_SHA}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.commit.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Choose the version
+        id: version
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [ -n "$REQUESTED" ] && ! [[ "$REQUESTED" =~ $semver ]]; then
+            echo "::error::Version must look like vX.Y.Z, got '$REQUESTED'"
+            exit 1
+          fi
+
+          highest=$(git tag --list 'v*' | grep -E "$semver" | sort -V | tail -n1 || true)
+          if [ -z "$highest" ]; then
+            echo "::error::No vX.Y.Z tag found to bump from"
+            exit 1
+          fi
+
+          # A tag already on this commit means an earlier run claimed it:
+          # finish that release instead of claiming another version. Only the
+          # highest version may become the latest release.
+          existing=$(git tag --points-at "$SHA" | grep -E "$semver" | sort -V | tail -n1 || true)
+          if [ -n "$existing" ] && { [ -z "$REQUESTED" ] || [ "$REQUESTED" = "$existing" ]; }; then
+            echo "$SHA is already tagged $existing; finishing that release."
+            echo "version=$existing" >> "$GITHUB_OUTPUT"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
+            if [ "$existing" = "$highest" ]; then latest=true; else latest=false; fi
+            echo "latest=$latest" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # CI runs for consecutive merges can finish out of order. Never tag
+          # a commit that is older than the highest release.
+          if ! git merge-base --is-ancestor "$(git rev-list -n1 "$highest")" "$SHA"; then
+            echo "::error::$SHA does not contain $highest; refusing to release an older commit"
+            exit 1
+          fi
+
+          if [ -n "$REQUESTED" ]; then
+            version="$REQUESTED"
+          else
+            IFS=. read -r major minor patch <<< "${highest#v}"
+            version="v$major.$minor.$((patch + 1))"
+          fi
+
+          if [ "$version" = "$highest" ] || [ "$(printf '%s\n%s\n' "$highest" "$version" | sort -V | tail -n1)" != "$version" ]; then
+            echo "::error::$version is not higher than $highest"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+            echo "::error::Tag $version already exists on another commit"
+            exit 1
+          fi
+
+          echo "Releasing $SHA as $version (previous: $highest)."
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "create_tag=true" >> "$GITHUB_OUTPUT"
+          echo "latest=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=$VERSION" \
+              -o "dist/checksumtool-$VERSION-linux-$arch" .
+          done
+
+          bin="dist/checksumtool-$VERSION-linux-amd64"
+          file "$bin"
+          file "$bin" | grep -q 'statically linked'
+          for flag in -version --version; do
+            out=$("$bin" "$flag")
+            if [ "$out" != "checksumtool $VERSION" ]; then
+              echo "::error::$flag printed '$out', expected 'checksumtool $VERSION'"
+              exit 1
+            fi
+          done
+
+          (cd dist && sha256sum checksumtool-* > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Create the tag
+        if: steps.version.outputs.create_tag == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: gh api "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$VERSION" -f "sha=$SHA"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/checksumtool-*
+
+      - name: Publish the release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          LATEST: ${{ steps.version.outputs.latest }}
+        run: |
+          set -euo pipefail
+          # Look the release up in the full list: the by-tag endpoint does not
+          # return drafts, and an earlier run may have left one behind.
+          release=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$VERSION\") | .id")
+
+          if [ -z "$release" ]; then
+            gh release create "$VERSION" --verify-tag --draft --generate-notes --title "$VERSION"
+          fi
+
+          # Assets go up while the release is still a draft or incomplete, and
+          # it is published last, so a consumer never sees a partial release.
+          # --clobber keeps the binaries consistent with this run's SHA256SUMS
+          # and attestations.
+          gh release upload "$VERSION" dist/* --clobber
+          gh release edit "$VERSION" --draft=false --prerelease=false "--latest=$LATEST"
+
+      - name: Verify the published release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          LATEST: ${{ steps.version.outputs.latest }}
+          WORKFLOW: ${{ github.repository }}/.github/workflows/release.yml
+        run: |
+          set -euo pipefail
+          mkdir check && cd check
+          gh release download "$VERSION" --pattern "checksumtool-$VERSION-linux-amd64" --pattern SHA256SUMS
+          sha256sum --check --ignore-missing SHA256SUMS
+          gh attestation verify "checksumtool-$VERSION-linux-amd64" \
+            --repo "$GH_REPO" \
+            --signer-workflow "$WORKFLOW" \
+            --source-ref refs/heads/main
+          latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
+          if [ "$LATEST" = "true" ] && [ "$latest" != "$VERSION" ]; then
+            echo "::error::releases/latest is $latest, not $VERSION"
+            exit 1
+          fi

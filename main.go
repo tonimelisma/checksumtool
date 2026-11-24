@@ -1462,6 +1462,7 @@ func main() {
 	var applyCategoriesText string
 	var listPathsText string
 	var relativeTo string
+	var showVersion bool
 	flag.StringVar(&dbFilePath, "db", defaultDBPath(), "Checksum database file location")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose output")
 	flag.StringVar(&mode, "mode", "", "Operation mode: sync, status, apply, apply-observations, recheck, verify-manifest, check, update, list-missing, add-missing, remove-deleted, list-deleted, migrate")
@@ -1482,11 +1483,17 @@ func main() {
 	flag.StringVar(&listPathsText, "list-paths", "", "sync: write paths per category, as category=file[,category=file...]")
 	flag.StringVar(&relativeTo, "relative-to", "", "sync -list-paths: write paths relative to this directory")
 	flag.BoolVar(&force, "force", false, "apply: use the scan report even if it is partial or the database changed since the scan")
+	flag.BoolVar(&showVersion, "version", false, "Print the version and exit")
 	flag.Usage = func() {
 		fmt.Fprint(flag.CommandLine.Output(), usageText)
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("checksumtool %s\n", versionString())
+		os.Exit(0)
+	}
 
 	// Load config file
 	cfg, err := loadConfig(configPath)

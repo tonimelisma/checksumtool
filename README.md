@@ -49,6 +49,7 @@ checksumtool [flags] [directories...]
 - `-apply-categories list`: With `sync -apply` or `apply`, apply only these categories: `metadata`, `modified`, `moved`, `new`, `corrupt`, `unverifiable`, `deleted`. Corrupt, unverifiable and deleted still also need `-with-corrupt` / `-with-deleted`
 - `-list-paths cat=file[,cat=file...]`: With `sync`, write each category's paths to a file, one per line. Categories: `new`, `moved` (new locations), `move_source` (old locations), `modified`, `corrupt`, `unverifiable`, `deleted`, `metadata`. A path containing a line break is not listed and is reported as an error
 - `-relative-to dir`: With `-list-paths`, write paths relative to this directory
+- `-version` / `--version`: Print `checksumtool vX.Y.Z` and exit
 
 ### Operation Modes
 - `sync`: One pass over everything. Verifies database entries, walks the directories for files not yet recorded, and classifies each file as verified, modified, corrupt, moved, new or deleted. Lists only the findings that need a decision — changed, corrupt, unverifiable and deleted files — while moves and additions are summarized as counts unless `-list-all` is given. Reports only and writes a scan report; add `-apply` to write the results in the same run. Requires at least one directory (from arguments or the config file). Exits with code 1 if any concerning finding is present or a file could not be read.
@@ -270,6 +271,11 @@ verify_budget = "115G"   # used by sync -quick
 
 **Precedence**: CLI flags always override config file values. If directories are passed as CLI arguments, config directories are ignored. If no CLI directories are provided, config directories are used only for `list-missing`, `add-missing` and `sync`; `check`, `update`, `list-deleted`, and `remove-deleted` scan the whole DB unless you explicitly pass directories. If the config file doesn't exist, defaults are used silently.
 
+## Changes in v3.5.1
+
+- **Version flag**: `-version` and `--version` print `checksumtool vX.Y.Z` and exit 0.
+- **Release binaries**: every release now carries static Linux binaries (`checksumtool-vX.Y.Z-linux-amd64`, `checksumtool-vX.Y.Z-linux-arm64`), a `SHA256SUMS` file and a signed build provenance attestation. No other behaviour changed.
+
 ## Changes in v3.5
 
 - **Percentage verify budgets**: `-verify-budget 3.4%` re-reads that share of the recorded data each run, computed from the files in scope every time, so the verification cycle stays about 29 days as the archive grows instead of lengthening under a fixed byte budget.
@@ -322,8 +328,26 @@ rsync -a --files-from=/tmp/new.txt /home/user/photos/ /mnt/copy/
 
 checksumtool is developed by Toni Melisma and released in 2024. The code was almost entirely written by Claude based on my algorithm and instructions.
 
+## Releases
+
+Releases are fully automatic. Every merge to `main` that passes CI (`.github/workflows/ci.yml`: gofmt, `go vet`, `go test -race`, `govulncheck`) is published as the next **patch** release by `.github/workflows/release.yml`: it bumps the patch of the highest `vX.Y.Z` tag, creates the tag, builds static `linux-amd64` and `linux-arm64` binaries with the version stamped in, writes `SHA256SUMS`, attests the binaries' build provenance and publishes the GitHub Release with generated notes. There is no approval step.
+
+To publish a **minor or major** version instead, run the Release workflow by hand on `main` (Actions → Release → Run workflow, branch `main`) with the version, for example `v3.6.0`, before or instead of waiting for the next merge. The version must be higher than every existing tag. A dispatch from any other branch is refused.
+
+Re-running a release for a commit that already has a tag finishes that release (uploads the assets, publishes the draft) instead of claiming a new version.
+
+To verify a downloaded binary:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify checksumtool-vX.Y.Z-linux-amd64 --repo tonimelisma/checksumtool \
+  --signer-workflow tonimelisma/checksumtool/.github/workflows/release.yml --source-ref refs/heads/main
+```
+
+Only `release.yml` running on `main` creates tags, releases or attestations. Nobody — in particular no cloud agent session — tags or releases by hand.
+
 ## Contributor Workflow
 
-Repository changes are expected to complete the full Definition of Done automatically: implement the change, run `go test -v`, `go test -race -v`, and `go vet ./...`, update docs, commit, push, and create a patch release tag for user-facing bug fixes unless the handoff explicitly explains why no release was done.
+Repository changes are expected to complete the full Definition of Done automatically: implement the change, run `go test -v`, `go test -race -v`, and `go vet ./...`, update docs, commit, push and merge to `main`. The merge publishes the patch release; never push tags or create releases by hand.
 
 The test suite is expected to stay hermetic: tests should use temp-only fixtures, isolate `HOME`/config/database paths when spawning the CLI, and never read from or write to a contributor's real checksumtool data.

@@ -3150,3 +3150,34 @@ func TestVerifyObservationManifestAgainstAlternateRoot(t *testing.T) {
 		t.Fatalf("alternate-root symlink escape was accepted: results=%+v err=%v", results, err)
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "checksumtool")
+	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-X main.version=v9.8.7", "-o", binPath, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to build binary: %v\n%s", err, out)
+	}
+	for _, arg := range []string{"-version", "--version"} {
+		out, err := hermeticCommand(t, binPath, arg).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: expected exit 0, got %v\n%s", arg, err, out)
+		}
+		if got, want := string(out), "checksumtool v9.8.7\n"; got != want {
+			t.Errorf("%s: got %q, want %q", arg, got, want)
+		}
+	}
+}
+
+func TestVersionStringFallback(t *testing.T) {
+	saved := version
+	t.Cleanup(func() { version = saved })
+	version = ""
+	if got := versionString(); got == "" {
+		t.Error("versionString() returned an empty string without a stamped version")
+	}
+	version = "v1.2.3"
+	if got := versionString(); got != "v1.2.3" {
+		t.Errorf("versionString() = %q, want v1.2.3", got)
+	}
+}
