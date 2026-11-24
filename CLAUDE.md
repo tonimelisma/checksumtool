@@ -11,7 +11,7 @@ go test -run TestFunctionName -v  # Run a single test
 go test -race -v                  # Run tests with race detector
 ```
 
-No Makefile, linter config, or CI pipeline exists — standard Go toolchain only.
+No Makefile or linter config — standard Go toolchain only. CI (`.github/workflows/ci.yml`) runs a gofmt check, `go vet ./...`, `go test -race ./...` and `govulncheck` on pull requests and pushes to main. Every action is pinned by commit SHA.
 
 Tests must remain hermetic. Use `t.TempDir()`/temp fixtures, isolate `HOME` and default config/data paths for subprocess CLI tests, and avoid touching a developer's real checksum database or config while running the suite.
 
@@ -62,6 +62,10 @@ Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by
 
 **Key flow**: `main()` → parse flags → `loadConfig()` → `loadChecksumDB()` → `getFilesToProcess()` (or `getSyncFiles()`) → spawn workers → `processResults()` → for sync, `buildScanReport()` → `saveScanReport()` and optionally `applyScanReport()` → `saveChecksumDB()`. Context-based interrupt handling via `context.WithCancel` stops job feeding on SIGINT/SIGTERM and saves the DB for mutating modes. An interrupted sync marks its report `partial`, which `apply` refuses without `-force` — a partial scan sees files as deleted that it never reached.
 
+**Version**: `-version` / `--version` print `checksumtool vX.Y.Z` and exit 0 before the config is read (`version.go`). The release workflow stamps `main.version` with `-ldflags -X`; otherwise the module version from Go's build info is used.
+
+**Releases (`.github/workflows/release.yml`)**: runs after CI succeeds for a push to main (`workflow_run`), or by `workflow_dispatch` on main with an optional `version`. It refuses any ref but `refs/heads/main`, builds the commit CI tested, picks the dispatch version or bumps the patch of the highest `vX.Y.Z` tag (refusing a version that isn't higher, or a commit that doesn't contain the highest tag), creates the tag with `GITHUB_TOKEN`, builds static linux-amd64/arm64 binaries, writes `SHA256SUMS`, attests them with `actions/attest-build-provenance`, and publishes the release with generated notes, then verifies it with `gh attestation verify`. A rerun on an already-tagged commit finishes that release. A `release` concurrency group serializes runs. It is the only workflow that tags, releases or attests, and nothing triggers on tag pushes: the owner's server installs only binaries attested by this file on refs/heads/main.
+
 **Default DB path**: `~/.local/share/checksumtool/checksums.json` (created with mode 0600). Scan reports default to `<db-dir>/<db-basename>.scan.json`, also 0600. Both are written through `writeFileAtomic()` (temp file + rename).
 
 **Exit codes**: 0 on success, 1 on checksum mismatches in check mode, on errors, and in sync mode on any concerning finding — modified, corrupt, unverifiable or deleted. Moves and additions are never errors, so an unattended sync fails only when something needs a human.
@@ -75,17 +79,13 @@ Every feature or change is complete when all of the following are satisfied:
 3. **Docs**: Update `README.md` (flags, usage examples, feature list) and `CLAUDE.md` (architecture notes)
 4. **Commit**: Create a git commit with a descriptive message
 5. **Push**: Push to the remote repository
-6. **Tag & Release**: User-facing changes should normally be released. Create and push a version tag for:
-   - Bug fixes and behavior corrections: patch release (for example `v1.1.1`)
-   - Backward-compatible features or meaningful UX improvements: minor release (for example `v1.2.0`)
-   - Breaking changes: major release
-   If a change is intentionally not being released yet, say that explicitly in the handoff instead of silently skipping the release step.
+6. **Release**: Merging to `main` publishes the next patch release automatically (see Releases above). For a minor or major version, the owner dispatches the Release workflow on `main` with the version. Never push tags or create releases by hand — cloud sessions cannot, and a hand-made release would carry no valid attestation. If a change should not be released yet, do not merge it to `main`, and say so in the handoff.
 
 ## Execution Expectations
 
-- Do not stop at implementation. Unless the user explicitly says otherwise, continue automatically through tests, docs, commit, push, and release work required by the Definition of Done.
+- Do not stop at implementation. Unless the user explicitly says otherwise, continue automatically through tests, docs, commit, push and merge work required by the Definition of Done.
 - Do not ask for permission for ordinary repository tasks that are already part of the Definition of Done. Execute them.
-- For user-facing bug fixes and behavior corrections, create and push the patch release tag automatically. Do not leave a fix unreleased just because the user did not separately ask for a release.
+- Releases follow from the merge to `main`; after merging, confirm that the Release workflow published the expected version.
 - Before handing off, perform a full Definition of Done audit in order. If any item is incomplete, stop, complete it, and then restart the audit from item 1. Repeat until every Definition of Done item is satisfied.
 - End every completed task with a compact Definition of Done report covering:
   - code changes made
@@ -93,4 +93,4 @@ Every feature or change is complete when all of the following are satisfied:
   - docs updated
   - commit SHA
   - push status
-  - release tag status, or an explicit reason no release was done
+  - release status (the version the Release workflow published), or an explicit reason no release was done
