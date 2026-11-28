@@ -4,7 +4,8 @@
 #
 #   script/stage start            fetch; latest main runs (push, workflow_run, scheduled), open issues, and
 #                                 review comments nobody replied to on the last 5 merged PRs
-#   script/stage pre-merge <PR>   wait for the `CI gate` check on the PR's head; fail unless green
+#   script/stage pre-merge <PR>   wait until no run on the PR's head is unfinished, then fail unless
+#                                 the newest `CI gate` check there is green
 #   script/stage post-merge <PR>  squash-merge pinned to the head commit if not merged yet, wait
 #                                 for main's runs (CI, then the release it triggers), then list
 #                                 remote branches other than main and open PRs' heads
@@ -74,6 +75,14 @@ cmd_start() {
 }
 
 gate_state() { # <sha>
+  # A newer run (a description edit re-runs CI) can still be queued while an older gate is
+  # complete: wait until no run on the commit is unfinished, then read the newest gate.
+  busy=$(api "repos/$repo/actions/runs?head_sha=$1&per_page=100" \
+    --jq '[.workflow_runs[] | select(.status != "completed")] | length')
+  if [ "$busy" != 0 ]; then
+    echo "$busy run(s) unfinished"
+    return
+  fi
   api "repos/$repo/commits/$1/check-runs?check_name=CI%20gate&per_page=100" --jq '
     if .total_count == 0 then "not started"
     else (.check_runs | max_by(.started_at)) as $r
