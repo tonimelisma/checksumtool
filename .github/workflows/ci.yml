@@ -2,8 +2,16 @@ name: CI
 
 on:
   pull_request:
+    # `edited`: a description fixed after the push re-runs the checks that read it. Every job runs
+    # on it, so the newest `CI gate` on a commit always reflects all the checks.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
+  schedule:
+    # Weekly re-run on main, off the hour: new Go releases and advisories show up here. The
+    # release workflow ignores scheduled runs.
+    - cron: "23 6 * * 2"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,20 +31,34 @@ jobs:
           # govulncheck has to judge.
           go-version: stable
 
-      - name: gofmt
+      # gofmt, go vet, go test -race, govulncheck and process-check.
+      - name: script/verify
+        run: script/verify
+
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # pr-check diffs the pull request's base and head
+          persist-credentials: false
+      - name: process-check
+        run: script/process-check
+      - name: pr-check
+        if: github.event_name == 'pull_request'
+        run: script/pr-check
+
+  # The one required status check. It needs every other job and passes only when each of them
+  # succeeded or was skipped, so a cancelled or failed job can never be merged around.
+  gate:
+    name: CI gate
+    if: always()
+    needs: [test, process]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test
-        run: go test -race ./...
-
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' >/dev/null

@@ -70,6 +70,7 @@ func hermeticCommand(t *testing.T, name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// Validates: CT-001
 func TestCalculateChecksum(t *testing.T) {
 	tempFile := filepath.Join(t.TempDir(), "testfile.txt")
 	content := []byte("Hello, world!")
@@ -228,6 +229,7 @@ func TestLoadChecksumDBCorrupt(t *testing.T) {
 	}
 }
 
+// Validates: CT-002
 func TestLoadChecksumDBNormalizesRelativePaths(t *testing.T) {
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "file.txt")
@@ -392,6 +394,7 @@ func TestGetFilesToProcessDirectoryFilter(t *testing.T) {
 	}
 }
 
+// Validates: CT-001
 func TestSaveChecksumDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 
@@ -430,6 +433,7 @@ func TestSaveChecksumDB(t *testing.T) {
 	}
 }
 
+// Validates: CT-001
 func TestSaveChecksumDBPermissions(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sub", "checksums.json")
 	checksumDB := &ChecksumDB{
@@ -628,6 +632,7 @@ func TestWalkDirectoriesForMissing(t *testing.T) {
 	}
 }
 
+// Validates: CT-011
 func TestWalkDirectoriesForMissingRootSymlinkDir(t *testing.T) {
 	tempDir := t.TempDir()
 	targetDir := filepath.Join(tempDir, "target")
@@ -850,6 +855,7 @@ func TestGetFilesToProcessDeletedDirectoryFilter(t *testing.T) {
 	}
 }
 
+// Validates: CT-070
 func TestGetFilesToProcessRequiresDirectories(t *testing.T) {
 	checksumDB := &ChecksumDB{Checksums: make(map[string]FileEntry)}
 
@@ -872,6 +878,7 @@ func TestWalkDirectoriesForMissingError(t *testing.T) {
 	}
 }
 
+// Validates: CT-006
 func TestDefaultDBPath(t *testing.T) {
 	home := setHermeticHome(t)
 	path := defaultDBPath()
@@ -924,6 +931,7 @@ func TestWorkerNoChecksum(t *testing.T) {
 	}
 }
 
+// Validates: CT-037, CT-061, CT-062, CT-070, CT-071
 func TestMainBinary(t *testing.T) {
 	// Build the binary
 	binPath := filepath.Join(t.TempDir(), "checksumtool")
@@ -1221,6 +1229,7 @@ func TestProcessResultsUpdateDeletedFile(t *testing.T) {
 	}
 }
 
+// Validates: CT-001
 func TestSaveChecksumDBAtomicValidJSON(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 	checksumDB := &ChecksumDB{
@@ -1251,6 +1260,7 @@ func TestSaveChecksumDBAtomicValidJSON(t *testing.T) {
 	}
 }
 
+// Validates: CT-004
 func TestLockDBFile(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 
@@ -1277,6 +1287,7 @@ func TestLockDBFile(t *testing.T) {
 	unlockDBFile(f2)
 }
 
+// Validates: CT-071
 func TestLoadConfig(t *testing.T) {
 	tempFile := filepath.Join(t.TempDir(), "config.toml")
 	content := `directories = ["/home/user/photos", "/home/user/docs"]
@@ -1306,6 +1317,7 @@ verbose = true
 	}
 }
 
+// Validates: CT-071
 func TestLoadConfigMissing(t *testing.T) {
 	cfg, err := loadConfig(missingPath(t, "missing", "config.toml"))
 	if err != nil {
@@ -1322,6 +1334,7 @@ func TestLoadConfigMissing(t *testing.T) {
 	}
 }
 
+// Validates: CT-071
 func TestLoadConfigInvalid(t *testing.T) {
 	tempFile := filepath.Join(t.TempDir(), "config.toml")
 	writeTestFile(t, tempFile, []byte("{{invalid toml!!"))
@@ -1342,6 +1355,7 @@ func TestLoadConfigEmptyPath(t *testing.T) {
 	}
 }
 
+// Validates: CT-071
 func TestDefaultConfigPath(t *testing.T) {
 	home := setHermeticHome(t)
 	path := defaultConfigPath()
@@ -1351,6 +1365,7 @@ func TestDefaultConfigPath(t *testing.T) {
 	}
 }
 
+// Validates: CT-037
 func TestResolveDirectories(t *testing.T) {
 	configDirs := []string{"/config/dir"}
 	cliDirs := []string{"/cli/dir"}
@@ -1405,6 +1420,7 @@ func TestResolveDirectories(t *testing.T) {
 	}
 }
 
+// Validates: CT-011
 func TestWalkDirectoriesForMissingSymlinkDir(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -1484,6 +1500,7 @@ func scanFileFor(t *testing.T, path string) ScanFile {
 
 // --- Legacy format and migration ---
 
+// Validates: CT-003
 func TestLoadChecksumDBRejectsLegacyFormat(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy.json")
 	writeTestFile(t, dbPath, []byte(`{"checksums":{"/tmp/file1":1234}}`))
@@ -1497,6 +1514,7 @@ func TestLoadChecksumDBRejectsLegacyFormat(t *testing.T) {
 	}
 }
 
+// Validates: CT-003
 func TestMigrateChecksumDB(t *testing.T) {
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "file.txt")
@@ -1560,6 +1578,7 @@ func TestMigrateChecksumDBMissing(t *testing.T) {
 
 // --- Mismatch classification ---
 
+// Validates: CT-020
 func TestClassifyMismatch(t *testing.T) {
 	known := FileEntry{Checksum: 1, Size: 10, ModTime: 500}
 
@@ -1582,6 +1601,7 @@ func TestClassifyMismatch(t *testing.T) {
 
 // --- Move detection ---
 
+// Validates: CT-030
 func TestResolveMovesOneToOne(t *testing.T) {
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]FileEntry{
@@ -1600,6 +1620,7 @@ func TestResolveMovesOneToOne(t *testing.T) {
 	}
 }
 
+// Validates: CT-030
 func TestResolveMovesDuplicateContentEqualCounts(t *testing.T) {
 	// Duplicate content is normal in a media archive. With equal counts every
 	// pairing produces the same database, so the group is safe to apply.
@@ -1624,6 +1645,7 @@ func TestResolveMovesDuplicateContentEqualCounts(t *testing.T) {
 	}
 }
 
+// Validates: CT-030
 func TestResolveMovesUnequalCountsAreAmbiguous(t *testing.T) {
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]FileEntry{
@@ -1646,6 +1668,7 @@ func TestResolveMovesUnequalCountsAreAmbiguous(t *testing.T) {
 	}
 }
 
+// Validates: CT-031
 func TestResolveMovesStrictRequiresOneToOne(t *testing.T) {
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]FileEntry{
@@ -1667,6 +1690,7 @@ func TestResolveMovesStrictRequiresOneToOne(t *testing.T) {
 	}
 }
 
+// Validates: CT-030
 func TestResolveMovesRejectsSizeMismatch(t *testing.T) {
 	// A checksum collision between differently-sized files must not be treated
 	// as a move.
@@ -1686,6 +1710,7 @@ func TestResolveMovesRejectsSizeMismatch(t *testing.T) {
 	}
 }
 
+// Validates: CT-030
 func TestResolveMovesAcceptsUnknownSize(t *testing.T) {
 	// Entries carried over from the legacy format have no size yet, so the
 	// checksum has to stand on its own.
@@ -1702,6 +1727,7 @@ func TestResolveMovesAcceptsUnknownSize(t *testing.T) {
 	}
 }
 
+// Validates: CT-030
 func TestResolveMovesNoMatchIsDeletionAndAddition(t *testing.T) {
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]FileEntry{
@@ -1738,6 +1764,7 @@ func runProcessResults(t *testing.T, mode string, checksumDB *ChecksumDB, result
 	return count
 }
 
+// Validates: CT-020
 func TestProcessResultsSyncClassification(t *testing.T) {
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]FileEntry{
@@ -1795,6 +1822,7 @@ func TestProcessResultsSyncClassification(t *testing.T) {
 	}
 }
 
+// Validates: CT-021
 func TestProcessResultsUpdateRefusesSuspectedCorruption(t *testing.T) {
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]FileEntry{
@@ -1814,6 +1842,7 @@ func TestProcessResultsUpdateRefusesSuspectedCorruption(t *testing.T) {
 	}
 }
 
+// Validates: CT-021
 func TestProcessResultsUpdateAcceptsSuspectWithFlag(t *testing.T) {
 	checksumDB := &ChecksumDB{
 		Checksums: map[string]FileEntry{
@@ -1849,6 +1878,7 @@ func TestProcessResultsUpdateRefreshesMetadata(t *testing.T) {
 	}
 }
 
+// Validates: CT-037
 func TestGetSyncFiles(t *testing.T) {
 	tempDir := t.TempDir()
 	known := filepath.Join(tempDir, "known.txt")
@@ -1875,6 +1905,7 @@ func TestGetSyncFiles(t *testing.T) {
 	}
 }
 
+// Validates: CT-037
 func TestResolveDirectoriesSyncUsesConfig(t *testing.T) {
 	configDirs := []string{"/config/photos"}
 
@@ -1888,6 +1919,7 @@ func TestResolveDirectoriesSyncUsesConfig(t *testing.T) {
 
 // --- Scan report and apply ---
 
+// Validates: CT-006
 func TestDefaultScanReportPath(t *testing.T) {
 	got := defaultScanReportPath(filepath.Join("/data", "checksums.json"))
 	want := filepath.Join("/data", "checksums.scan.json")
@@ -1896,6 +1928,7 @@ func TestDefaultScanReportPath(t *testing.T) {
 	}
 }
 
+// Validates: CT-032
 func TestScanReportRoundTrip(t *testing.T) {
 	reportPath := filepath.Join(t.TempDir(), "scan.json")
 	report := &ScanReport{
@@ -1930,6 +1963,7 @@ func TestScanReportRoundTrip(t *testing.T) {
 	}
 }
 
+// Validates: CT-034
 func TestVerifyScanReport(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
 	writeTestFile(t, dbPath, []byte(`{"checksums":{}}`))
@@ -1970,6 +2004,7 @@ func TestVerifyScanReport(t *testing.T) {
 	}
 }
 
+// Validates: CT-033
 func TestApplyScanReportMove(t *testing.T) {
 	tempDir := t.TempDir()
 	oldPath := filepath.Join(tempDir, "old.txt")
@@ -1999,6 +2034,7 @@ func TestApplyScanReportMove(t *testing.T) {
 	}
 }
 
+// Validates: CT-033
 func TestApplyScanReportSkipsMoveWhenSourceReturns(t *testing.T) {
 	tempDir := t.TempDir()
 	oldPath := filepath.Join(tempDir, "old.txt")
@@ -2020,6 +2056,7 @@ func TestApplyScanReportSkipsMoveWhenSourceReturns(t *testing.T) {
 	}
 }
 
+// Validates: CT-033
 func TestApplyScanReportSkipsStaleFile(t *testing.T) {
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "file.txt")
@@ -2041,6 +2078,7 @@ func TestApplyScanReportSkipsStaleFile(t *testing.T) {
 	}
 }
 
+// Validates: CT-033
 func TestApplyScanReportNewAndTouched(t *testing.T) {
 	tempDir := t.TempDir()
 	newFile := filepath.Join(tempDir, "new.txt")
@@ -2064,6 +2102,7 @@ func TestApplyScanReportNewAndTouched(t *testing.T) {
 	}
 }
 
+// Validates: CT-035
 func TestApplyScanReportDeletionsNeedFlag(t *testing.T) {
 	// An unmounted volume makes every file under it look deleted, so removals
 	// are never automatic.
@@ -2086,6 +2125,7 @@ func TestApplyScanReportDeletionsNeedFlag(t *testing.T) {
 	}
 }
 
+// Validates: CT-035
 func TestApplyScanReportKeepsDeletedFileThatIsBack(t *testing.T) {
 	tempDir := t.TempDir()
 	backAgain := filepath.Join(tempDir, "back.txt")
@@ -2102,6 +2142,7 @@ func TestApplyScanReportKeepsDeletedFileThatIsBack(t *testing.T) {
 	}
 }
 
+// Validates: CT-021
 func TestApplyScanReportCorruptNeedsFlag(t *testing.T) {
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "rotted.txt")
@@ -2126,6 +2167,7 @@ func TestApplyScanReportCorruptNeedsFlag(t *testing.T) {
 	}
 }
 
+// Validates: CT-032
 func TestScanReportEmpty(t *testing.T) {
 	if !(&ScanReport{Verified: 12}).Empty() {
 		t.Error("Expected a report with only verified files to be empty")
@@ -2158,6 +2200,7 @@ func readDB(t *testing.T, dbPath string) map[string]FileEntry {
 	return checksumDB.Checksums
 }
 
+// Validates: CT-030, CT-032
 func TestSyncDetectsAndAppliesMove(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2233,6 +2276,7 @@ func TestSyncDetectsAndAppliesMove(t *testing.T) {
 	}
 }
 
+// Validates: CT-050
 func TestSyncWritesVersionedObservationManifest(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2301,6 +2345,7 @@ func TestSyncWritesVersionedObservationManifest(t *testing.T) {
 	}
 }
 
+// Validates: CT-051
 func TestManifestKeepsPositiveEvidenceButDoesNotInferMissingRootDeletion(t *testing.T) {
 	binPath := buildTestBinary(t)
 	goodRoot := t.TempDir()
@@ -2355,6 +2400,7 @@ func TestManifestKeepsPositiveEvidenceButDoesNotInferMissingRootDeletion(t *test
 	}
 }
 
+// Validates: CT-052
 func TestManifestMoveSourceCannotBeAppliedSeparately(t *testing.T) {
 	binPath := buildTestBinary(t)
 	root := t.TempDir()
@@ -2417,6 +2463,7 @@ func TestManifestMoveSourceCannotBeAppliedSeparately(t *testing.T) {
 	}
 }
 
+// Validates: CT-051
 func TestManifestRootWalkRetainsPositiveFilesOnUnreadableSubtree(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission test requires an unprivileged user")
@@ -2441,6 +2488,7 @@ func TestManifestRootWalkRetainsPositiveFilesOnUnreadableSubtree(t *testing.T) {
 	}
 }
 
+// Validates: CT-051
 func TestManifestKeepsDatabaseObservationsOutsideWalkRootsUncovered(t *testing.T) {
 	binPath := buildTestBinary(t)
 	base := t.TempDir()
@@ -2500,6 +2548,7 @@ func TestManifestKeepsDatabaseObservationsOutsideWalkRootsUncovered(t *testing.T
 	}
 }
 
+// Validates: CT-021, CT-036, CT-062
 func TestSyncApplyOneShotAndCorruptionExitCode(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2549,6 +2598,7 @@ func TestSyncApplyOneShotAndCorruptionExitCode(t *testing.T) {
 	}
 }
 
+// Validates: CT-003
 func TestMigrateCLI(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2591,6 +2641,7 @@ func TestMigrateCLI(t *testing.T) {
 	}
 }
 
+// Validates: CT-070
 func TestHelpDescribesModes(t *testing.T) {
 	binPath := buildTestBinary(t)
 
@@ -2610,6 +2661,7 @@ func TestHelpDescribesModes(t *testing.T) {
 	}
 }
 
+// Validates: CT-070
 func TestSyncRequiresDirectories(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dbPath := filepath.Join(t.TempDir(), "checksums.json")
@@ -2624,6 +2676,7 @@ func TestSyncRequiresDirectories(t *testing.T) {
 	}
 }
 
+// Validates: CT-034
 func TestApplyRefusesStaleReport(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2657,6 +2710,7 @@ func TestApplyRefusesStaleReport(t *testing.T) {
 	}
 }
 
+// Validates: CT-011
 func TestWalkDirectoriesForMissingKeepsAncestorSymlinkPrefix(t *testing.T) {
 	// Resolving ancestors would move the walk into a different path space than
 	// the database, which is keyed by filepath.Abs, and every recorded file
@@ -2693,6 +2747,7 @@ func TestWalkDirectoriesForMissingKeepsAncestorSymlinkPrefix(t *testing.T) {
 	}
 }
 
+// Validates: CT-011
 func TestResolveWalkRootFollowsSymlinkChain(t *testing.T) {
 	tempDir := t.TempDir()
 	targetDir := filepath.Join(tempDir, "target")
@@ -2720,6 +2775,7 @@ func TestResolveWalkRootFollowsSymlinkChain(t *testing.T) {
 
 // A sync run whose only findings are a move and an addition has nothing worth a
 // human's attention, so it must neither list them nor fail.
+// Validates: CT-060
 func TestSyncListsOnlyConcerningFindingsByDefault(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2772,6 +2828,7 @@ func TestSyncListsOnlyConcerningFindingsByDefault(t *testing.T) {
 // Cron mails whatever a job writes, so a scan that found nothing needing a
 // decision must write nothing at all -- not a summary, not a verdict, not even
 // a blank line. The exit code is what carries the result to the caller.
+// Validates: CT-061, CT-062
 func TestSyncIsSilentWhenNothingNeedsADecision(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2805,6 +2862,7 @@ func TestSyncIsSilentWhenNothingNeedsADecision(t *testing.T) {
 
 // -list-all restores the full listing. It is deliberately independent of
 // -verbose, so a progress bar does not drag the noise back in.
+// Validates: CT-060
 func TestSyncListAllListsMovesAndAdditions(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2852,6 +2910,7 @@ func TestSyncListAllListsMovesAndAdditions(t *testing.T) {
 
 // An edit and a disappearance are both worth failing over, even though neither
 // is a read error and neither is suspected corruption.
+// Validates: CT-062
 func TestSyncExitsNonZeroOnModifiedAndDeleted(t *testing.T) {
 	binPath := buildTestBinary(t)
 	dataDir := t.TempDir()
@@ -2894,6 +2953,7 @@ func TestSyncExitsNonZeroOnModifiedAndDeleted(t *testing.T) {
 	}
 }
 
+// Validates: CT-062
 func TestScanReportConcerning(t *testing.T) {
 	// Moves and additions are ordinary; the rest are not.
 	calm := &ScanReport{
@@ -2917,6 +2977,7 @@ func TestScanReportConcerning(t *testing.T) {
 	}
 }
 
+// Validates: CT-010
 func TestCalculateStableChecksumReturnsOpenedIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file.txt")
 	if err := os.WriteFile(path, []byte("stable bytes"), 0600); err != nil {
@@ -2938,6 +2999,7 @@ func TestCalculateStableChecksumReturnsOpenedIdentity(t *testing.T) {
 	}
 }
 
+// Validates: CT-010
 func TestStableSnapshotDetectsSameSizeRewriteWithRestoredMtime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file.txt")
 	if err := os.WriteFile(path, []byte("first bytes"), 0600); err != nil {
@@ -2963,6 +3025,7 @@ func TestStableSnapshotDetectsSameSizeRewriteWithRestoredMtime(t *testing.T) {
 	}
 }
 
+// Validates: CT-050
 func TestObservationIdentityBindsClassificationAndFacts(t *testing.T) {
 	base := FileObservation{Path: "/archive/a", Category: "verified", ScanID: "scan-1", Observed: &FileEntry{Checksum: 42, Size: 5, ModTime: 7}}
 	setObservationIdentity(&base)
@@ -2978,6 +3041,7 @@ func TestObservationIdentityBindsClassificationAndFacts(t *testing.T) {
 	}
 }
 
+// Validates: CT-052
 func TestApplyObservationSelectiveCompareAndSwap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tracked.txt")
 	writeTestFile(t, path, []byte("edited bytes"))
@@ -3017,6 +3081,7 @@ func TestApplyObservationSelectiveCompareAndSwap(t *testing.T) {
 	}
 }
 
+// Validates: CT-053
 func TestTargetedRecheckCannotConfirmDeletion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "restored.txt")
 	db := &ChecksumDB{Checksums: map[string]FileEntry{path: {Checksum: 99, Size: 7, ModTime: 10}}}
@@ -3036,6 +3101,7 @@ func TestTargetedRecheckCannotConfirmDeletion(t *testing.T) {
 	}
 }
 
+// Validates: CT-052
 func TestDeletionApplyRefusesAReplacedSourceRoot(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "archive")
@@ -3069,6 +3135,7 @@ func TestDeletionApplyRefusesAReplacedSourceRoot(t *testing.T) {
 	}
 }
 
+// Validates: CT-052
 func TestApplyMovedObservationAtomicallyAndIdempotently(t *testing.T) {
 	dir := t.TempDir()
 	from := filepath.Join(dir, "old.txt")
@@ -3106,6 +3173,7 @@ func TestApplyMovedObservationAtomicallyAndIdempotently(t *testing.T) {
 	}
 }
 
+// Validates: CT-054
 func TestVerifyObservationManifestAgainstAlternateRoot(t *testing.T) {
 	source := t.TempDir()
 	target := t.TempDir()
@@ -3151,6 +3219,7 @@ func TestVerifyObservationManifestAgainstAlternateRoot(t *testing.T) {
 	}
 }
 
+// Validates: CT-072
 func TestVersionFlag(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "checksumtool")
 	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-X main.version=v9.8.7", "-o", binPath, ".")
@@ -3169,6 +3238,7 @@ func TestVersionFlag(t *testing.T) {
 	}
 }
 
+// Validates: CT-072
 func TestVersionStringFallback(t *testing.T) {
 	saved := version
 	t.Cleanup(func() { version = saved })

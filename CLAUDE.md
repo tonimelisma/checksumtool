@@ -1,96 +1,189 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## What this is
 
-## Build & Test Commands
+checksumtool detects file corruption (bit rot) in large archives. It records an xxhash64
+checksum, size and modification time for every file in a JSON database, and later runs tell
+corruption apart from edits, moves, additions and deletions. A single-package Go CLI
+(dependencies: `github.com/cespare/xxhash/v2`, `github.com/BurntSushi/toml`), released as static
+Linux binaries with provenance attestations. Architecture: [docs/architecture.md](docs/architecture.md).
 
-```bash
-go build -o checksumtool          # Build binary
-go test -v                        # Run all tests
-go test -run TestFunctionName -v  # Run a single test
-go test -race -v                  # Run tests with race detector
+## Working style
+
+- When it is clear what is wanted, do it. Ask only for what only the user can do, or for a real
+  product choice nobody has made yet.
+- Don't end a turn with a summary announcing the next step, an offer to continue, or a list of
+  decisions that block nothing: take the next step.
+- Stop only when nothing can move forward without the user, or when what blocks you is
+  deliberately protected (a permission, a ruleset, a secret). Then say exactly what is needed.
+- Still confirm destructive or irreversible actions outside the normal flow (deleting data,
+  rewriting history, changing settings); the normal flow (branch, commit, PR, merge, release) is
+  not one of them.
+
+## Product invariants
+
+- Size and modification time classify a mismatch; they never skip hashing. `sync -quick` is the
+  one opt-in exception, and its verify budget restores full coverage over a cycle.
+  ([ADR 0001](docs/adr/0001-metadata-never-skips-hashing.md))
+- A corrupt or unverifiable checksum is never written over without `-with-corrupt`: the old
+  checksum is the only evidence of rot. ([ADR 0001](docs/adr/0001-metadata-never-skips-hashing.md))
+- `sync` changes nothing; `apply` writes only from a fresh, complete scan report, re-stats every
+  file instead of re-reading it, and applies deletions only under `-with-deleted`. Absence under a
+  root without complete coverage is never a deletion.
+  ([ADR 0002](docs/adr/0002-scan-then-apply.md))
+- An unattended `sync` speaks, and exits 1, only when something needs a human; moves and
+  additions never do. ([ADR 0002](docs/adr/0002-scan-then-apply.md))
+- A config file never narrows what gets verified: config `directories` seed walk roots only.
+  ([ADR 0002](docs/adr/0002-scan-then-apply.md))
+- Only `.github/workflows/release.yml`, running on CI-green main, tags, releases or attests.
+  ([ADR 0003](docs/adr/0003-attested-release-from-ci-green-main.md))
+- Path lists, manifests and the scan report are generic tool interfaces: keep backup- or
+  host-specific policy out of them.
+
+## Engineering philosophy
+
+- No compatibility shims. When a structure is wrong, replace it and migrate its callers in the
+  same change.
+- The smallest correct design. Simplicity first; measure before optimizing, never optimize on a
+  hunch.
+- One owner per fact, per mutation and per side effect. Two places that know the same thing will
+  disagree.
+- Abstractions only at real boundaries (a process, a network, a storage format, a platform), not
+  in anticipation.
+- Don't guess and don't fabricate: an unknown API, path, value or result is looked up, measured or
+  reported as unknown.
+- You own the repository. Nothing is "pre-existing" or someone else's problem, and red CI is never
+  waived: it is fixed first.
+- Comments and docs describe current behavior and why it is that way, never its history.
+
+## Engineering practices
+
+- Test first. A change in behavior starts with a test that fails without it.
+- Every bug, CI failure and review finding gets a regression test, seen failing before the fix;
+  quote its red output in the PR.
+- The instrumentation flywheel, every increment:
+  - Never guess a bug's cause. If the logs and metrics can't explain it, add the instrumentation
+    first, so this occurrence or the next one is diagnosable, then fix.
+  - Never guess at performance: measure, keep a baseline, optimize, and report before and after.
+  - Even when nothing is blocked, review the instrumentation on every path you touched: add what
+    was missing, remove what is noise.
+- Tests are hermetic: temporary directories and fixtures, never the developer's real data, config
+  or accounts.
+- Go: `gofmt`, `go vet`; the standard toolchain only, no Makefile or linter config. Tests that run
+  the binary use `hermeticCommand()`, which isolates `HOME` and the XDG paths.
+- Every action in `.github/workflows/` is pinned to a commit SHA with a `# vX.Y.Z` comment, and
+  tools in `run:` to an exact version.
+
+## Commands
+
+```sh
+script/verify                                  # everything CI checks; run before every push
+go build -o checksumtool                       # build
+go test -race ./...                            # full test suite
+go test -run TestFunctionName -v               # one test
+gofmt -w .                                     # format
+script/process-check                           # requirements, Validates tags and doc links agree
+script/stage start | pre-merge <PR> | post-merge <PR>
 ```
 
-No Makefile or linter config — standard Go toolchain only. CI (`.github/workflows/ci.yml`) runs a gofmt check, `go vet ./...`, `go test -race ./...` and `govulncheck` on pull requests and pushes to main. Every action is pinned by commit SHA.
+## Where docs live
 
-Tests must remain hermetic. Use `t.TempDir()`/temp fixtures, isolate `HOME` and default config/data paths for subprocess CLI tests, and avoid touching a developer's real checksum database or config while running the suite.
+- `docs/index.md` maps every doc. Requirements live in `docs/requirements.md`: stable IDs, one
+  EARS sentence each, current behavior only, each `[verified]` by a test tagged
+  `Validates: <ID>` or `unverified: <why>`. Future work lives in GitHub issues, not in docs.
+- `docs/architecture.md` says how the code is built and why; `docs/adr/NNNN-title.md` records each
+  decision (superseded, never deleted); `docs/lessons.md` holds rules learned and open problems,
+  and is pruned when they are resolved.
+- Update the docs and this file in the same PR as the code they describe.
 
-## Architecture
+## Increment lifecycle
 
-Single-package Go CLI tool (`main.go`) that detects file corruption (bit rot) by computing xxhash64 checksums and storing them in a JSON database. External dependencies: `github.com/cespare/xxhash/v2`, `github.com/BurntSushi/toml`.
+1. **Start**: `script/stage start`. Anything red on main or in the last scheduled run, and any
+   unanswered review comment on recent PRs, is fixed before new work. Read the open issues.
+2. **Ready**: write the Definition of Ready in the PR body: the problem, requirement IDs or
+   issue, acceptance criteria, what is out of scope.
+3. **Test first**, then implement with the instrumentation flywheel.
+4. **Verify** with the one verify command; it must be green before pushing.
+5. **Docs** (requirements, architecture, ADRs, lessons, this file) in the same PR.
+6. **Land**: PR, wait for `CI gate`, squash-merge, which releases (see Git, CI and PRs).
+7. **Report**: after the merge, one PR comment with the Definition of Done checklist and the final
+   increment report (below).
 
-**Core data structures**:
-- `FileEntry` — the database value: `{checksum, size, mtime}`. Size and mtime exist to tell corruption apart from an edit, and are never used to skip hashing (bit rot does not touch either). Zero means "unknown" and suppresses metadata-based inference for that entry.
-- `ChecksumDB` — a map of absolute file paths to `FileEntry`, protected by a `sync.Mutex`, plus an optional `Verified` map (path → Unix time of the last read that matched). Verification times are deliberately outside `FileEntry`: approvals and observation identities compare entries, and a read time must never make an entry look changed. `saveChecksumDB()` prunes times for paths no longer recorded. `loadChecksumDB()` normalizes any legacy relative keys to absolute paths on load, and refuses the pre-v3 bare-number format with a pointer to `-mode migrate`.
-- `WorkerResult` — struct carrying file path, checksum, size, mtime, existence flag, and error from workers.
-- `ScanReport` / `ScanFile` / `ScanMove` — what a `sync` run leaves behind so `apply` can write the database without re-reading files. Lists only changes, never the files that verified cleanly. `Concerning()` counts the findings that warrant a human decision (modified, corrupt, unverifiable, deleted); moves and additions are deliberately excluded, since they are the ordinary result of using a filesystem.
-- `ObservationManifest` / `FileObservation` — optional schema-v1 machine output requested with `-manifest`. Unlike the legacy scan report, it records each completed observation, including verified files, and binds a stable observation identity to its facts. It is evidence only; it grants no permission to apply or delete.
+A plan that spans several increments lives in a GitHub tracking issue with a checklist, never in
+a file. Never committed: per-PR report or readiness files, session state or resume files, ledgers
+of merged PRs. That information belongs in the PR and its comments.
 
-**Concurrency model**: Worker pool pattern using goroutines and channels. `worker()` goroutines read from a jobs channel, stat then hash each file, and send `WorkerResult`s to a results channel. `processResults()` consumes results and applies mode-specific logic. An `outputMu` mutex serializes stdout writes. Worker count is configurable (default: 4).
+## Git, CI and PRs
 
-**Two-phase sync**: every mode except `sync` acts on each result as it arrives. `sync` cannot: a move is the join of a vanished database entry and a discovered file that share a checksum, and neither half means anything until the walk finishes. So `processResults` accumulates into `syncState`, and `resolveMoves()` performs the join afterwards. A checksum group becomes moves only when both sides have equal counts (any pairing then yields the same database) and recorded sizes agree; otherwise it falls back to deletions plus additions. `-strict-moves` narrows this to one-to-one.
+- One branch per increment, cut from a fresh `origin/main`, named `feat/`, `fix/`, `docs/`,
+  `chore/`, `refactor/` or `perf/` plus a short topic. Never reuse a branch after its PR merged;
+  never name a branch for the tool that wrote it.
+- Every change lands through a PR whose body fills `.github/pull_request_template.md`. CI checks
+  the body, and that a PR titled `fix...` changes a test.
+- `CI gate` is the one required check: a job that needs every other job. Wait for it
+  (`script/stage pre-merge <PR>`), and fix every failure; never bypass it.
+- Squash-merge as soon as `CI gate` is green, without asking: in a cloud session with
+  `gh api -X PUT repos/<owner>/<repo>/pulls/<N>/merge -f merge_method=squash -f sha=<head sha>`
+  (`script/stage post-merge <PR>` does this); locally with `gh pr merge --auto --squash`.
+- Merging to main releases; nobody tags or publishes by hand.
+- The cloud sessions' GitHub proxy refuses tag pushes, branch deletion and GraphQL: use the REST
+  API (`gh api`), and leave branch deletion to GitHub's delete-on-merge and the branch-cleanup
+  workflow.
+- Commit messages: an imperative subject saying what changed; the body says why.
+- Releases (`.github/workflows/release.yml`): CI succeeding for a push to main triggers it
+  (`workflow_run`); it builds the commit CI tested, picks the next patch after the highest
+  `vX.Y.Z` tag, creates the tag with `GITHUB_TOKEN`, builds static linux-amd64/arm64 binaries
+  stamped through `-ldflags -X main.version`, writes `SHA256SUMS`, attests them with
+  `actions/attest-build-provenance`, publishes with generated notes, and verifies the published
+  release with `gh attestation verify`. It refuses any ref but `refs/heads/main`, a version not
+  higher than the highest tag, and a commit that does not contain that tag; a rerun on a tagged
+  commit finishes that release; the `release` concurrency group serializes runs. Scheduled and
+  PR runs of CI never release.
+- A minor or major series starts by dispatching the Release workflow on main with `version`
+  set (`workflow_dispatch`); patches follow from it automatically.
+- CI (`.github/workflows/ci.yml`): `test` (gofmt, vet, race tests, govulncheck via
+  `script/verify`), `process` (`script/process-check`, and `script/pr-check` on PRs), and
+  `CI gate`; also weekly on main. Branch cleanup: `.github/workflows/branch-cleanup.yml`.
 
-**Reporting altitude**: `printScanSummary()` lists concerning findings individually and reduces moves and additions to counts, restoring the full listing under `-list-all` (kept separate from `-verbose`, which is about progress reporting). Every category still appears in the summary block and in the scan report, so nothing is hidden outright — only demoted. A run with findings ends with an explicit `Needs attention` verdict.
+## Privacy review
 
-**Silence off a terminal**: `sync` prints nothing at all — not even a blank line — when it found nothing needing a decision and stdout is not a terminal. The call site computes `silent` from `!interactive && !listAll && !report.Partial && !concerning` and passes it to `printScanSummary()`, which returns immediately; the same flag gates the scan-report path message and `printApplyStats()`. `interactive` also forces `verbose` off, so config-supplied `verbose = true` cannot resurrect the chatter under cron. The reason is operational: cron mails whatever a job writes, so a report that always arrives is one that stops being read. An interrupted scan (`report.Partial`) still speaks, because it verified only part of the archive.
-
-**Mismatch classification**: `classifyMismatch()` returns corrupt (metadata unchanged), unverifiable (no recorded metadata) or modified (metadata changed). Corrupt and unverifiable are never written to the database without `-with-corrupt` — overwriting them destroys the only evidence of rot. This is why `update` no longer blindly overwrites changed files.
-
-**Filesystem walking**: `list-missing`, `add-missing` and `sync` resolve directory arguments through symlinks before walking, skip symlinked directories found inside the walk to avoid loops and directory hashing errors, and still process symlinked files by hashing their targets.
-
-**Stable read check**: checksum reads compare opened-file identity, size, modification time, mode and change time before and after hashing, then verify the path still resolves to that opened file. A replaced or ordinarily changing file is an error instead of a usable digest. This narrows read races; it does not create a filesystem snapshot.
-
-**Observation manifest**: `sync -manifest PATH` emits JSON with a schema version independent of DB v3. Existing scan-report behavior remains unchanged. A partial manifest is marked partial but keeps completed positive observations. Each root reports `complete`, `missing`, `unreadable` or `incomplete`; absence from a root without `complete` coverage is `unconfirmed_absence`, never a deletion. Enumeration continues across independent roots and retains files found before a subtree error.
-
-**Selective observation application**: `apply-observations -manifest PATH -select ID[,ID...]` compares only selected entries against their expected baseline values. It re-reads and re-hashes selected positive files, checks device/inode where available, and writes the DB atomically under the exclusive DB lock. Modified/corrupt/unverifiable bytes require explicit `-accept-suspect`; deletions require `-with-deleted` and complete root coverage. A move applies its old/new baseline entries together; the source-side observation cannot be applied alone. Results are per-item JSON; unapplied observations stay in the manifest. `recheck -manifest PATH FILE...` hashes only named files and emits positive evidence in a targeted partial manifest without authorizing any absence.
-
-**Alternate-root verification**: `verify-manifest -manifest PATH -select ID[,ID...] ALTROOT` maps selected paths relative to their recorded source root, checks stable content digests and sizes, and never writes the database. Select one source root per invocation; traversal and missing/incomplete observations fail explicitly.
-
-**Operation modes** (`-mode` flag): `sync`, `status`, `apply`, `apply-observations`, `recheck`, `verify-manifest`, `check`, `update`, `list-missing`, `add-missing`, `list-deleted`, `remove-deleted`, `migrate`. Directories are optional for DB-based modes (check, update, remove-deleted, list-deleted); required for filesystem-walking modes (list-missing, add-missing, sync). Apply, recheck and manifest verification use focused paths and bypass the full worker pipeline.
-
-**Scan/apply split**: `sync` writes a `ScanReport` sidecar (`<db>.scan.json`) and changes nothing; `apply` re-stats each listed file and writes the recorded checksum only if size and mtime are unchanged since the scan, so no file is read twice. The report records the database's size and mtime, and `apply` refuses a report whose database has changed or whose scan was interrupted unless `-force`. Deletions need `-with-deleted` because an unmounted volume makes every file under it look deleted. `sync -apply` runs both phases in one process and deletes the report afterwards.
-
-**Directory semantics for sync**: config `directories` supply walk roots only. The database filter still comes from CLI arguments alone, so a config file can never silently narrow what gets verified.
-
-**Quick sync and rolling verification (v3.4, `rolling.go`)**: `sync -quick` is the one deliberate exception to "size and mtime never skip hashing", and it is opt-in. `quickSelect()` keeps entries whose file is gone, changed size/mtime or has unknown metadata, plus — up to the `-verify-budget` (bytes, or a percentage of the in-scope recorded bytes resolved each run by `verifyBudget.resolve()`, so the cycle length stays fixed as data grows) — the unchanged entries with the oldest `Verified` time (none counts as oldest). Everything else is reported as `unread`. A quick run alone cannot see bit rot; the budget is what restores it over a cycle. Verified times are written only when a run writes the database (`-apply`), including an interrupted one, so rotation progresses.
-
-**Selective categories and path lists**: `applyOpts.categories` gates each block of `applyScanReport()`; corrupt, unverifiable and deleted additionally still need their flags. `writePathLists()` writes sorted per-category paths (moves split into `moved` destinations and `move_source` origins), optionally relative to `-relative-to`; a path containing a line break, or one outside the base, is reported and left out, never mangled. These are generic tool interfaces — keep backup- or host-specific policy out of them.
-
-**Read order and cache use**: the job list is sorted by path before hashing so a directory's files are read together instead of in map order. On Linux, `calculateStableChecksum()` advises `POSIX_FADV_SEQUENTIAL` before reading and `POSIX_FADV_DONTNEED` after hashing (`fadvise_linux.go`; no-ops elsewhere in `fadvise_other.go`). Every file is read once per scan, so caching it would only evict other programs' pages. The advice is best effort and never changes results.
-
-**Config file**: Optional TOML config at `~/.config/checksumtool/config.toml` (override with `-config` flag). Supports `directories`, `workers`, `verbose`, `strict_moves` and `verify_budget` fields. CLI flags always override config values; `flag.Visit()` detects explicitly-set flags. Config `directories` seed `list-missing`, `add-missing` and `sync` when no CLI directories are given, while DB-based modes only filter when directories are explicitly passed on the command line. Missing config file is silently ignored.
-
-**Key flow**: `main()` → parse flags → `loadConfig()` → `loadChecksumDB()` → `getFilesToProcess()` (or `getSyncFiles()`) → spawn workers → `processResults()` → for sync, `buildScanReport()` → `saveScanReport()` and optionally `applyScanReport()` → `saveChecksumDB()`. Context-based interrupt handling via `context.WithCancel` stops job feeding on SIGINT/SIGTERM and saves the DB for mutating modes. An interrupted sync marks its report `partial`, which `apply` refuses without `-force` — a partial scan sees files as deleted that it never reached.
-
-**Version**: `-version` / `--version` print `checksumtool vX.Y.Z` and exit 0 before the config is read (`version.go`). The release workflow stamps `main.version` with `-ldflags -X`; otherwise the module version from Go's build info is used.
-
-**Releases (`.github/workflows/release.yml`)**: runs after CI succeeds for a push to main (`workflow_run`), or by `workflow_dispatch` on main with an optional `version`. It refuses any ref but `refs/heads/main`, builds the commit CI tested, picks the dispatch version or bumps the patch of the highest `vX.Y.Z` tag (refusing a version that isn't higher, or a commit that doesn't contain the highest tag), creates the tag with `GITHUB_TOKEN`, builds static linux-amd64/arm64 binaries, writes `SHA256SUMS`, attests them with `actions/attest-build-provenance`, and publishes the release with generated notes, then verifies it with `gh attestation verify`. A rerun on an already-tagged commit finishes that release. A `release` concurrency group serializes runs. It is the only workflow that tags, releases or attests, and nothing triggers on tag pushes: the owner's server installs only binaries attested by this file on refs/heads/main.
-
-**Default DB path**: `~/.local/share/checksumtool/checksums.json` (created with mode 0600). Scan reports default to `<db-dir>/<db-basename>.scan.json`, also 0600. Both are written through `writeFileAtomic()` (temp file + rename).
-
-**Exit codes**: 0 on success, 1 on checksum mismatches in check mode, on errors, and in sync mode on any concerning finding — modified, corrupt, unverifiable or deleted. Moves and additions are never errors, so an unattended sync fails only when something needs a human.
+Before every commit, read your own staged diff (`git diff --cached`) and remove anything private
+about the maintainer, their family or their computers: people's names, addresses, personal email
+addresses and accounts, hostnames, home-directory paths, IP addresses, tenant, client or vault
+IDs, real personal documents or photos. Use neutral stand-ins in tests and examples. There is no
+list of private terms to check against: judge the diff.
 
 ## Definition of Done
 
-Every feature or change is complete when all of the following are satisfied:
+An increment is done when every line holds; the final report marks each ✅ or ❌ with evidence:
 
-1. **Code**: Implementation in `main.go` (or new files if needed)
-2. **Tests**: Unit and integration tests pass — `go test -v`, `go test -race -v`, `go vet ./...`
-3. **Docs**: Update `README.md` (flags, usage examples, feature list) and `CLAUDE.md` (architecture notes)
-4. **Commit**: Create a git commit with a descriptive message
-5. **Push**: Push to the remote repository
-6. **Release**: Merging to `main` publishes the next patch release automatically (see Releases above). For a minor or major version, the owner dispatches the Release workflow on `main` with the version. Never push tags or create releases by hand — cloud sessions cannot, and a hand-made release would carry no valid attestation. If a change should not be released yet, do not merge it to `main`, and say so in the handoff.
+- [ ] Start stage clean: main CI, the last scheduled run and recent review comments were green or
+      fixed first.
+- [ ] Tests first; the regression test's red output before the fix is quoted.
+- [ ] The verify command is green, and CI is green on the final commit.
+- [ ] Traceability and doc checks (`script/process-check`, `script/pr-check`) are green.
+- [ ] Docs and CLAUDE.md are updated in the same PR.
+- [ ] Instrumentation reviewed on touched paths: what was added, what removed, or why it is
+      adequate.
+- [ ] Privacy review done on every commit's staged diff.
+- [ ] Every review thread is answered or resolved.
+- [ ] Merged; main CI green; the release it produced is linked.
+- [ ] Clean up: only main and open PRs' branches remain on the remote; the working tree is clean.
 
-## Execution Expectations
+### Final increment report
 
-- Do not stop at implementation. Unless the user explicitly says otherwise, continue automatically through tests, docs, commit, push and merge work required by the Definition of Done.
-- Do not ask for permission for ordinary repository tasks that are already part of the Definition of Done. Execute them.
-- Releases follow from the merge to `main`; after merging, confirm that the Release workflow published the expected version.
-- Before handing off, perform a full Definition of Done audit in order. If any item is incomplete, stop, complete it, and then restart the audit from item 1. Repeat until every Definition of Done item is satisfied.
-- End every completed task with a compact Definition of Done report covering:
-  - code changes made
-  - verification commands and results
-  - docs updated
-  - commit SHA
-  - push status
-  - release status (the version the Release workflow published), or an explicit reason no release was done
+One PR comment after the merge, with these parts:
+
+1. **Done / not done**: what the increment delivered, and anything left out.
+2. **Definition of Ready**: as written, and whether it held.
+3. **Requirements, ADRs and docs**: IDs added, changed or retired; ADRs; docs touched.
+4. **Design decisions**: each with the alternatives considered and why they lost.
+5. **Verification evidence**: commands, CI run links and durations, release link.
+6. **Regression test**: name and red output before the fix (or "no bug fixed").
+7. **Diagnosis**: for a bug, the root cause and how it was established.
+8. **Instrumentation**: added, removed, and gaps still open.
+9. **Performance**: before and after numbers, or "not touched".
+10. **Privacy review**: done on every commit; anything removed.
+11. **Smells**: what looked wrong but was out of scope.
+12. **Follow-ups**: each filed as an issue, linked.
+13. **Definition of Done**: the checklist above, each line ✅ or ❌ with evidence.
