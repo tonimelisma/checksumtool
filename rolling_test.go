@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+// Validates: CT-041
 func TestParseByteSize(t *testing.T) {
 	cases := map[string]int64{"0": 0, "512": 512, "1K": 1024, "2M": 2 << 20, "115G": 115 << 30, "1.5G": 3 << 29, "1TiB": 1 << 40, "3gb": 3 << 30}
 	for text, want := range cases {
@@ -26,6 +27,7 @@ func TestParseByteSize(t *testing.T) {
 	}
 }
 
+// Validates: CT-041
 func TestPercentVerifyBudget(t *testing.T) {
 	db := &ChecksumDB{Checksums: map[string]FileEntry{"/a": {Size: 600}, "/b": {Size: 400}, "/c": {Size: 1000}}}
 	paths := []string{"/a", "/b"}
@@ -47,6 +49,7 @@ func TestPercentVerifyBudget(t *testing.T) {
 	}
 }
 
+// Validates: CT-040
 func TestQuickSelectRotatesByVerificationAge(t *testing.T) {
 	dir := t.TempDir()
 	db := &ChecksumDB{Checksums: map[string]FileEntry{}}
@@ -86,6 +89,7 @@ func TestQuickSelectRotatesByVerificationAge(t *testing.T) {
 	}
 }
 
+// Validates: CT-005
 func TestVerifiedTimesDoNotChangeEntries(t *testing.T) {
 	db := &ChecksumDB{Checksums: map[string]FileEntry{"/x/a": {Checksum: 1, Size: 2, ModTime: 3}}}
 	before := db.Checksums["/x/a"]
@@ -100,6 +104,7 @@ func TestVerifiedTimesDoNotChangeEntries(t *testing.T) {
 	}
 }
 
+// Validates: CT-005
 func TestOlderReadersIgnoreVerifiedTimes(t *testing.T) {
 	data, err := json.Marshal(&ChecksumDB{
 		Checksums: map[string]FileEntry{"/x/a": {Checksum: 1, Size: 2, ModTime: 3}},
@@ -117,6 +122,7 @@ func TestOlderReadersIgnoreVerifiedTimes(t *testing.T) {
 	}
 }
 
+// Validates: CT-043
 func TestWritePathListsRefusesLineBreaks(t *testing.T) {
 	dir := t.TempDir()
 	report := &ScanReport{New: []ScanFile{{Path: filepath.Join(dir, "ok #1.txt")}, {Path: filepath.Join(dir, "bad\nname")}, {Path: "/elsewhere/x"}}}
@@ -131,6 +137,7 @@ func TestWritePathListsRefusesLineBreaks(t *testing.T) {
 	}
 }
 
+// Validates: CT-043
 func TestApplyCategoriesValidation(t *testing.T) {
 	if _, err := parseApplyCategories("new,bogus"); err == nil {
 		t.Fatal("unknown category accepted")
@@ -158,6 +165,7 @@ func readList(t *testing.T, path string) []string {
 // features exist for: record additions and moves, leave every content change
 // and deletion for review, hand the paths to another tool, and let a later
 // budgeted run find bit rot that a quick run cannot see.
+// Validates: CT-040, CT-042
 func TestQuickSyncEndToEnd(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "checksumtool")
 	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {

@@ -1,9 +1,9 @@
 # Publishes a GitHub Release for every commit that lands on main and passes CI.
 #
-# This is the only workflow that creates tags, releases or attestations. The
-# owner's server installs a release only if its binary carries a provenance
-# attestation signed by this file running on refs/heads/main, so nothing here
-# may run from another branch, and nothing triggers on tag pushes.
+# This is the only workflow that creates tags, releases or attestations.
+# Consumers verify a binary by its provenance attestation, signed by this file
+# running on refs/heads/main, so nothing here may run from another branch, and
+# nothing triggers on tag pushes.
 name: Release
 
 on:
@@ -190,6 +190,7 @@ jobs:
           gh release upload "$VERSION" dist/* --clobber
           gh release edit "$VERSION" --draft=false --prerelease=false "--latest=$LATEST"
 
+      # Validates: CT-080 (on every release: checksums, attestation, latest)
       - name: Verify the published release
         env:
           VERSION: ${{ steps.version.outputs.version }}

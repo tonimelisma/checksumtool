@@ -1,0 +1,15 @@
+#!/bin/sh
+# Everything CI checks, in one command: formatting, vet, the race-enabled test suite, the
+# vulnerability scan, and the requirement/doc traceability check. Run before every push.
+set -eu
+cd "$(dirname "$0")/.."
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  echo "These files need gofmt:"
+  echo "$unformatted"
+  exit 1
+fi
+go vet ./...
+go test -race ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+script/process-check
